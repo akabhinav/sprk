@@ -7,6 +7,7 @@ import com.minispark.rdd.Partition;
 import com.minispark.rdd.RDD;
 import com.minispark.shuffle.ShuffleHandle;
 import com.minispark.shuffle.ShuffleWriter;
+import com.minispark.storage.ExecutorLocation;
 
 import java.util.Iterator;
 
@@ -15,12 +16,13 @@ import java.util.Iterator;
  * pushes the records through a {@link ShuffleWriter}, which bucketizes them
  * by reduce-partition and persists each bucket as a shuffle block.
  *
- * <p>The task itself returns nothing meaningful (just a marker); reducers
- * locate the output via the {@link com.minispark.storage.MapOutputTracker}.
+ * <p>The task returns the {@link ExecutorLocation} where it wrote its blocks.
+ * The driver registers that with the master {@link com.minispark.storage.MapOutputTracker}
+ * so reducers (possibly on other executors) can locate and fetch the output.
  *
- * Real Spark equivalent: org.apache.spark.scheduler.ShuffleMapTask
+ * Real Spark equivalent: org.apache.spark.scheduler.ShuffleMapTask (returns MapStatus)
  */
-public final class ShuffleMapTask<K, V> extends Task<Void> {
+public final class ShuffleMapTask<K, V> extends Task<ExecutorLocation> {
 
     private final RDD<Tuple2<K, V>> rdd;
     private final Partition partition;
@@ -36,17 +38,19 @@ public final class ShuffleMapTask<K, V> extends Task<Void> {
     }
 
     @Override
-    public Void run(TaskContext ctx) {
+    public ExecutorLocation run(TaskContext ctx) {
         Iterator<Tuple2<K, V>> records = rdd.compute(partition, ctx);
         // Tasks fetch executor-local services via SparkEnv. The reference must
         // not travel inside the serialized task because each executor has its
         // own ShuffleManager / BlockManager.
-        ShuffleWriter<K, V> writer = SparkEnv.get().shuffleManager().getWriter(handle, partitionId());
+        SparkEnv env = SparkEnv.get();
+        ShuffleWriter<K, V> writer = env.shuffleManager().getWriter(handle, partitionId());
         try {
             writer.write(records);
         } finally {
             writer.stop(true);
         }
-        return null;
+        // Report where the blocks landed so the driver can register the output.
+        return env.blockManager().location();
     }
 }

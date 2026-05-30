@@ -4,6 +4,8 @@ import com.minispark.rdd.Dependency;
 import com.minispark.rdd.Partition;
 import com.minispark.rdd.RDD;
 import com.minispark.rdd.ShuffleDependency;
+import com.minispark.storage.ExecutorLocation;
+import com.minispark.storage.MapOutputTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,14 +42,16 @@ public final class DAGScheduler {
     private static final Logger LOG = LoggerFactory.getLogger(DAGScheduler.class);
 
     private final TaskScheduler taskScheduler;
+    private final MapOutputTracker mapOutputTracker; // the driver-side master
     private final AtomicInteger stageIdGen = new AtomicInteger();
 
     // Memoize ShuffleMapStages keyed by shuffleId so a shuffle reused by two
     // downstream stages doesn't get rematerialized.
     private final Map<Integer, ShuffleMapStage> shuffleIdToStage = new HashMap<>();
 
-    public DAGScheduler(TaskScheduler taskScheduler) {
+    public DAGScheduler(TaskScheduler taskScheduler, MapOutputTracker mapOutputTracker) {
         this.taskScheduler = taskScheduler;
+        this.mapOutputTracker = mapOutputTracker;
     }
 
     public <T, U> List<U> runJob(RDD<T> finalRdd, ResultTask.ResultHandler<T, U> handler) {
@@ -129,10 +133,19 @@ public final class DAGScheduler {
                     stage.shuffleDep().handle()));
         }
         LOG.info("Submitting ShuffleMapStage {}: {} map tasks", stage.id(), tasks.size());
+        int shuffleId = stage.shuffleDep().shuffleId();
+        List<TaskResult<?>> results;
         try {
-            taskScheduler.submitTasks(new TaskSet(stage.id(), tasks)).get();
+            results = taskScheduler.submitTasks(new TaskSet(stage.id(), tasks)).get();
         } catch (Exception e) {
             throw new RuntimeException("ShuffleMapStage " + stage.id() + " failed", e);
+        }
+        // Register each completed map task's output location with the master
+        // tracker. Reducers (possibly in other JVMs) query this to find and
+        // fetch their buckets. This must happen before any dependent stage runs.
+        for (TaskResult<?> r : results) {
+            ExecutorLocation loc = (ExecutorLocation) r.value;
+            mapOutputTracker.registerMapOutput(shuffleId, r.partitionId, loc);
         }
     }
 

@@ -97,7 +97,10 @@ public final class HashShuffleManager implements ShuffleManager {
                 BlockId.ShuffleBlock id = new BlockId.ShuffleBlock(handle.shuffleId, mapId, reduceId);
                 blockManager.putBlock(id, bytes);
             }
-            tracker.registerMapOutput(handle.shuffleId, mapId, blockManager.location());
+            // NB: we do NOT register the map output here. The task returns its
+            // block location and the driver's DAGScheduler registers it with the
+            // master MapOutputTracker. This keeps the authoritative map on the
+            // driver, which is essential once executors live in other JVMs.
         }
 
         @Override public void stop(boolean success) { /* nothing to release for in-memory writer */ }

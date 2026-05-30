@@ -88,13 +88,74 @@ distribution later.
 The same lookup pattern moved `ShuffledRDD.compute` off `context()` (a
 `transient` field that's null on executors) onto `SparkEnv.get()`.
 
+## Phase 4 — RPC seam: driver and executors as separate processes
+
+This is the phase that makes the engine genuinely distributed. Nothing the
+scheduler does changed; we swapped *how components talk*.
+
+**The RPC abstraction** (`minispark-rpc`):
+- `RpcEndpoint` — a named message handler with `receive` (one-way) and
+  `receiveAndReply` (request/response).
+- `RpcEndpointRef` — a handle to a (possibly remote) endpoint, with `send`,
+  `ask`, `askAsync`. Callers cannot tell local from remote. That's the seam.
+- `RpcEnv` — publishes endpoints and hands out refs. Two implementations:
+  - `LocalRpcEnv`: in-process, delivers by direct call (one-way sends on a
+    virtual-thread dispatcher). No serialization — same-JVM fast path.
+  - `NettyRpcEnv`: real TCP. Hand-rolled length-prefixed framing
+    (`[int length][serialized TransportMessage]`) over blocking sockets, one
+    virtual thread per connection. We chose blocking + virtual threads over a
+    NIO selector for readability; Java 21 makes thousands of blocked threads
+    cheap. Each env runs a server and opens cached outbound client
+    connections; ask-replies return on the same connection via a reader
+    thread that completes pending futures keyed by request id.
+
+**The coarse-grained backend** (`CoarseGrainedSchedulerBackend` +
+`CoarseGrainedExecutorBackend`) reimplements driver↔executor as RPC:
+- `RegisterExecutor` (executor→driver ask): "I'm up at host:port with N cores."
+- `LaunchTask` (driver→executor): a serialized task to run.
+- `StatusUpdate` (executor→driver): FINISHED + serialized result, or FAILED.
+- `ReviveOffers` (driver self-message): try to schedule pending tasks onto
+  free cores.
+
+"Coarse-grained" = an executor registers once and serves many tasks (vs a
+process per task). The driver tracks free cores per executor and dispatches
+greedily; on each `StatusUpdate` it frees the slot and offers again.
+
+**Two transports, one config flag** (`minispark.rpc.mode`):
+- `local` (default): `LocalRpcEnv` + one in-process executor that shares the
+  driver's `SparkEnv`. Shuffle blocks live in shared heap.
+- `netty`: `NettyRpcEnv` + `ProcessExecutorLauncher`, which spawns each
+  executor as a **separate JVM** via `ProcessBuilder` using
+  `$JAVA_HOME/bin/java` and the parent classpath. Each child builds its own
+  `SparkEnv` and dials home over TCP. Set `minispark.executor.instances` and
+  `minispark.executor.cores` to scale.
+
+**Distributed shuffle.** Once executors are in different JVMs, two things had
+to become network-aware (the interfaces were already shaped for it):
+- `MapOutputTracker` split into master (driver, authoritative) and worker
+  (executor, asks the master via `GetMapStatuses` and caches). `ShuffleMapTask`
+  now returns its `ExecutorLocation`; the driver's `DAGScheduler` registers
+  each one with the master after the map stage completes.
+- `NetworkBlockManager` serves a `"BlockManager"` endpoint and, on
+  `getRemoteBlock`, fetches a bucket from the owning executor with a
+  `FetchBlock` RPC. A reducer thus reads one bucket locally and pulls the
+  rest over the wire.
+
+Proven by `NettyDistributedTest`: the identical WordCount pipeline runs across
+two executor JVMs, with the shuffle crossing the network, producing the same
+result as local mode.
+
+Design note: our protocol messages carry only primitives/bytes/addresses,
+never an `RpcEndpointRef` — each side rebuilds the refs it needs from its own
+`RpcEnv`. Real Spark instead rebinds serialized refs on the receiving env; we
+took the simpler route and documented it.
+
 ## What's next
 
-- **Phase 4**: replace direct method calls between driver and executor with
-  messages over `RpcEnv` (LocalRpcEnv + NettyRpcEnv).
 - **Phase 5**: MiniYarn — ResourceManager, NodeManagers, ApplicationMaster,
-  Containers. `YarnSchedulerBackend` slots into the same `SchedulerBackend`
-  seam that `LocalSchedulerBackend` uses today.
+  Containers. A `YarnSchedulerBackend` reuses the `CoarseGrainedExecutorBackend`
+  and the same `SchedulerBackend` seam; only the `ExecutorLauncher` changes
+  from "spawn a local process" to "ask a NodeManager to launch a container".
 - **Phase 6**: lineage-based recomputation on executor loss, task retry,
   `rdd.cache()` via `BlockManager`, broadcast variables, sort shuffle,
   speculative execution, a tiny web UI.

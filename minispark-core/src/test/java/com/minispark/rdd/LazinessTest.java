@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Transformations must not execute until an action is invoked. This is what
  * lets the DAGScheduler see the whole pipeline before launching anything.
  *
- * <p>Note the counter is {@code static}. The LocalSchedulerBackend serializes
+ * <p>Note the counter is {@code static}. The scheduler backend serializes
  * every task closure even in local mode (to surface "not serializable" bugs
  * early); a captured {@code AtomicInteger} would be cloned on deserialization
  * and the executor would increment a copy invisible to the driver. Globals

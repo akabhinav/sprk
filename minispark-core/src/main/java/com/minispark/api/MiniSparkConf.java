@@ -22,13 +22,25 @@ public final class MiniSparkConf {
     public MiniSparkConf setAppName(String name) { return set("minispark.app.name", name); }
     public MiniSparkConf setMaster(String master) { return set("minispark.master", master); }
 
-    public String appName() { return entries.getOrDefault("minispark.app.name", "minispark-app"); }
-    public String master()  { return entries.getOrDefault("minispark.master", "local[*]"); }
+    public String appName() { return get("minispark.app.name", "minispark-app"); }
+    public String master()  { return get("minispark.master", "local[*]"); }
 
-    public Optional<String> getOption(String key) { return Optional.ofNullable(entries.get(key)); }
-    public String get(String key, String defaultValue) { return entries.getOrDefault(key, defaultValue); }
-    public int getInt(String key, int defaultValue) {
+    /**
+     * Lookup order: explicit {@code set(...)} entries first, then JVM system
+     * properties (so {@code -Dminispark.rpc.mode=netty} works without code
+     * changes, mirroring how Spark reads {@code spark.*} system properties).
+     */
+    public Optional<String> getOption(String key) {
         String v = entries.get(key);
-        return v == null ? defaultValue : Integer.parseInt(v);
+        if (v == null) v = System.getProperty(key);
+        return Optional.ofNullable(v);
+    }
+
+    public String get(String key, String defaultValue) {
+        return getOption(key).orElse(defaultValue);
+    }
+
+    public int getInt(String key, int defaultValue) {
+        return getOption(key).map(Integer::parseInt).orElse(defaultValue);
     }
 }
