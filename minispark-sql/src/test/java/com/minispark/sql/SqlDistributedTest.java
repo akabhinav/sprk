@@ -46,10 +46,13 @@ final class SqlDistributedTest {
                  MiniSparkSession spark = MiniSparkSession.on(sc)) {
 
                 // 200 rows across 4 regions so the shuffle spans both executors.
+                // Each row in a region contributes a fixed amount of 10, so the
+                // expected sum is trivially 50 rows × 10 = 500 per region — no
+                // arithmetic ambiguity, easy to verify.
                 List<Row> sales = new ArrayList<>();
                 String[] regions = {"east", "west", "north", "south"};
                 for (int i = 0; i < 200; i++) {
-                    sales.add(Row.of(regions[i % 4], (i % 50) + 1));
+                    sales.add(Row.of(regions[i % 4], 10));
                 }
                 spark.createDataFrame(sales, StructType.of(
                         StructField.of("region", DataType.STRING),
@@ -79,10 +82,11 @@ final class SqlDistributedTest {
             runner.shutdownNow();
         }
 
-        // Each region has 50 rows (200/4); amounts cycle 1..50, so each region's
-        // sum is 1+2+...+50 = 1275, and all four pass HAVING count(*) > 10.
+        // Each region has 50 rows × amount 10 = 500, and all four pass
+        // HAVING count(*) > 10.
         assertThat(sums).hasSize(4);
         assertThat(sums).containsKeys("east", "west", "north", "south");
-        assertThat(sums.get("east")).isEqualTo(1275L);
+        assertThat(sums.get("east")).isEqualTo(500L);
+        assertThat(sums.get("south")).isEqualTo(500L);
     }
 }
