@@ -87,6 +87,11 @@ public final class DataFrame {
         return new DataFrame(session, new com.minispark.sql.plan.Limit(n, logicalPlan));
     }
 
+    /** Deduplicate whole rows. */
+    public DataFrame distinct() {
+        return new DataFrame(session, new com.minispark.sql.plan.Distinct(logicalPlan));
+    }
+
     /** Group by the given columns; call {@code .agg(...)} on the result. */
     public GroupedData groupBy(Column... cols) {
         List<Expression> exprs = new ArrayList<>(cols.length);

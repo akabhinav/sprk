@@ -72,8 +72,9 @@ public final class Analyzer {
             }
             return new com.minispark.sql.plan.Sort(bound, s.child());
         }
-        // Limit has no expressions to bind; its analyzed child is already set above.
-        if (withResolvedChildren instanceof com.minispark.sql.plan.Limit) {
+        // Limit/Distinct have no expressions to bind; their analyzed child is set above.
+        if (withResolvedChildren instanceof com.minispark.sql.plan.Limit
+                || withResolvedChildren instanceof com.minispark.sql.plan.Distinct) {
             return withResolvedChildren;
         }
         if (withResolvedChildren instanceof com.minispark.sql.plan.Join j) {

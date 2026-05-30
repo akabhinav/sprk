@@ -616,9 +616,34 @@ SELECT/WHERE/GROUP BY core, wrapping the project-or-aggregate result. Tested by
 LIMIT cap, ORDER BY+LIMIT top-N, and `SELECT *` value + schema), via both DSL
 and SQL text.
 
+## Tier B (part 5) — DISTINCT, HAVING, JOIN ... ON
+
+The SQL surface is now broadly complete.
+
+**DISTINCT** → `Distinct` node → `DistinctExec`, which keys each row by itself
+(Row has value equals/hashCode) and `reduceByKey` keeps one — the same shuffle
+path as a GROUP BY on every column, exactly how Spark implements it.
+
+**HAVING** reuses `Filter`: it's a predicate over the aggregate's output, so it
+becomes `Filter(condition, Aggregate(...))`. The subtlety is that a HAVING
+predicate like `sum(amount) > 50` contains an aggregate call; the parser
+rewrites each such `AggMarker` into an `UnresolvedAttribute` referencing the
+aggregate's already-produced output column (`sum(amount)`), which the analyzer
+then binds against the Aggregate's schema — no special physical node needed.
+
+**JOIN ... ON** — the `FROM` clause grew a join loop:
+`[INNER|LEFT|RIGHT|FULL] [OUTER] JOIN t ON a = b [AND c = d]`. The equi-join
+keys are parsed at the `additive()` precedence level so the `=` separator isn't
+swallowed into a comparison expression; they feed the existing `Join` node and
+`ShuffledHashJoinExec`. So `SELECT name, count(*) FROM people JOIN orders ON
+id = pid GROUP BY name` parses, plans, and runs through two shuffles.
+
+Tested by `DistinctHavingJoinTest`: distinct (multi- and single-column),
+HAVING after GROUP BY, inner/left JOIN ON, and a join feeding a group-by.
+
 ### Tier B — still to come
-- `DISTINCT`, `HAVING`, explicit `JOIN ... ON` syntax in the parser
-- Column pruning, broadcast-join selection by size, sort-merge join
+- Column pruning, broadcast-join selection by size, sort-merge join (optimizer
+  depth, not new surface)
 
 ## Tier C+ — further separate projects
 

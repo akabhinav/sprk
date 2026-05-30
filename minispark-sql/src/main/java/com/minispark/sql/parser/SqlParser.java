@@ -57,9 +57,11 @@ public final class SqlParser {
 
     public LogicalPlan query() {
         expectKeyword("SELECT");
+        boolean distinct = false;
+        if (peekKeyword("DISTINCT")) { advance(); distinct = true; }
         List<SelectItem> items = selectItems();
         expectKeyword("FROM");
-        LogicalPlan plan = new UnresolvedRelation(identifierName());
+        LogicalPlan plan = fromClause();
 
         if (peekKeyword("WHERE")) {
             advance();
@@ -73,8 +75,16 @@ public final class SqlParser {
             while (match(TokenType.COMMA)) groupBy.add(expression());
         }
 
-        // SELECT/WHERE/GROUP BY first build the project-or-aggregate, then ORDER
-        // BY and LIMIT wrap that (they apply to the already-projected rows).
+        // HAVING is a predicate over the aggregate's output, so it parses now
+        // and is applied as a Filter on top of the Aggregate below.
+        Expression having = null;
+        if (peekKeyword("HAVING")) {
+            advance();
+            having = predicate();
+        }
+
+        // SELECT/WHERE/GROUP BY first build the project-or-aggregate, then
+        // HAVING/DISTINCT/ORDER BY/LIMIT wrap that, in SQL evaluation order.
         List<com.minispark.sql.plan.SortOrder> orderBy = new ArrayList<>();
         if (peekKeyword("ORDER")) {
             advance(); expectKeyword("BY");
@@ -94,9 +104,84 @@ public final class SqlParser {
         expect(TokenType.EOF, "end of statement");
 
         LogicalPlan result = buildProjectOrAggregate(items, groupBy, plan);
+        if (having != null) {
+            // HAVING runs after aggregation: any aggregate call in it (e.g.
+            // sum(amount)) is already an output column of the Aggregate, so
+            // rewrite the marker into a reference to that column by name.
+            result = new Filter(rewriteHavingAggregates(having), result);
+        }
+        if (distinct) result = new com.minispark.sql.plan.Distinct(result);
         if (!orderBy.isEmpty()) result = new com.minispark.sql.plan.Sort(orderBy, result);
         if (limit >= 0) result = new com.minispark.sql.plan.Limit(limit, result);
         return result;
+    }
+
+    /**
+     * FROM clause: a base table optionally followed by JOIN clauses. We support
+     * {@code [INNER|LEFT|RIGHT|FULL] [OUTER] JOIN t ON a = b}.
+     */
+    private LogicalPlan fromClause() {
+        LogicalPlan left = new UnresolvedRelation(identifierName());
+        while (isJoinStart()) {
+            com.minispark.sql.plan.JoinType type = joinType();
+            expectKeyword("JOIN");
+            LogicalPlan right = new UnresolvedRelation(identifierName());
+            expectKeyword("ON");
+            // ON must be an equi-join: leftCol = rightCol (AND leftCol2 = rightCol2 ...).
+            List<Expression> lk = new ArrayList<>();
+            List<Expression> rk = new ArrayList<>();
+            parseEquiJoinCondition(lk, rk);
+            left = new com.minispark.sql.plan.Join(left, right, lk, rk, type);
+        }
+        return left;
+    }
+
+    private boolean isJoinStart() {
+        return peekKeyword("JOIN") || peekKeyword("INNER") || peekKeyword("LEFT")
+                || peekKeyword("RIGHT") || peekKeyword("FULL");
+    }
+
+    private com.minispark.sql.plan.JoinType joinType() {
+        com.minispark.sql.plan.JoinType t = com.minispark.sql.plan.JoinType.INNER;
+        if (peekKeyword("INNER")) { advance(); }
+        else if (peekKeyword("LEFT")) { advance(); t = com.minispark.sql.plan.JoinType.LEFT; }
+        else if (peekKeyword("RIGHT")) { advance(); t = com.minispark.sql.plan.JoinType.RIGHT; }
+        else if (peekKeyword("FULL")) { advance(); t = com.minispark.sql.plan.JoinType.FULL; }
+        if (peekKeyword("OUTER")) advance(); // optional noise word
+        return t;
+    }
+
+    /**
+     * Parse {@code col = col [AND col = col]...} into parallel key lists. We use
+     * {@code additive()} (the precedence level just below comparison) for each
+     * side so the {@code =} is NOT swallowed into an equality expression — it's
+     * the join-condition separator we consume explicitly.
+     */
+    private void parseEquiJoinCondition(List<Expression> lk, List<Expression> rk) {
+        do {
+            Expression l = additive();
+            expect(TokenType.EQ, "= in JOIN ON");
+            Expression r = additive();
+            lk.add(l);
+            rk.add(r);
+        } while (peekKeyword("AND") && consume());
+    }
+
+    private boolean consume() { advance(); return true; }
+
+    /**
+     * Replace every {@link AggMarker} in a HAVING predicate with an
+     * {@link UnresolvedAttribute} referencing the aggregate's output column
+     * (e.g. {@code sum(amount)}), since by the time HAVING's Filter runs the
+     * aggregation has already produced that column.
+     */
+    private Expression rewriteHavingAggregates(Expression e) {
+        if (e instanceof AggMarker m) return new UnresolvedAttribute(m.fn.name());
+        List<Expression> children = e.children();
+        if (children.isEmpty()) return e;
+        List<Expression> rewritten = new ArrayList<>(children.size());
+        for (Expression c : children) rewritten.add(rewriteHavingAggregates(c));
+        return e.withChildren(rewritten);
     }
 
     /** One ORDER BY term: expr followed by optional ASC/DESC. */

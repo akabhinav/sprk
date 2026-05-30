@@ -47,6 +47,9 @@ public final class SparkPlanner {
         if (logical instanceof com.minispark.sql.plan.Limit l) {
             return new LimitExec(l.limit(), plan(l.child()), sc);
         }
+        if (logical instanceof com.minispark.sql.plan.Distinct d) {
+            return new DistinctExec(plan(d.child()));
+        }
         throw new UnsupportedOperationException("No physical strategy for " + logical);
     }
 }
