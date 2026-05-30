@@ -21,8 +21,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Note we cannot use a {@code CountDownLatch} captured in the task closure to
  * detect "task started": closures are serialized before they run (even in local
  * mode), so the executor would count down a <i>clone</i> of the latch, not the
- * driver's. Instead we sleep a fixed, generous interval before cancelling — far
- * shorter than the task's own sleep, so the cancel still lands mid-flight.
+ * driver's. Instead we sleep a fixed interval before cancelling — far shorter
+ * than the task's own sleep, so the cancel still lands mid-flight.
  */
 final class JobCancellationTest {
 
@@ -63,18 +63,15 @@ final class JobCancellationTest {
                     .isNotNull();
             // The abort reason is carried as the cause of the wrapping
             // "ResultStage N failed" RuntimeException; check the whole chain.
-            String chain = throwableChain(caught.get()).toLowerCase();
-            assertThat(chain).contains("abort");
+            assertThat(throwableChain(caught.get()).toLowerCase()).contains("abort");
         }
     }
 
     private static String throwableChain(Throwable t) {
         StringBuilder sb = new StringBuilder();
-        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+        for (Throwable cur = t; cur != null && cur.getCause() != cur; cur = cur.getCause()) {
             sb.append(cur).append(" | ");
-            if (cur.getCause() == cur) break;
         }
         return sb.toString();
-        }
     }
 }
