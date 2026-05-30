@@ -38,7 +38,10 @@ final class SqlDistributedTest {
                     .setMaster("local")
                     .set("minispark.rpc.mode", "netty")
                     .set("minispark.executor.instances", "2")
-                    .set("minispark.executor.cores", "2");
+                    .set("minispark.executor.cores", "2")
+                    // Generous heartbeat window: spawning 2 executor JVMs under a
+                    // loaded CI box can briefly starve them; a 5s default can flake.
+                    .set("minispark.executor.heartbeatTimeoutMs", "30000");
             try (MiniSparkContext sc = new MiniSparkContext(conf);
                  MiniSparkSession spark = MiniSparkSession.on(sc)) {
 
