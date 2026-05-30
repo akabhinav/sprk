@@ -31,7 +31,7 @@ public final class ShuffleMapTask<K, V> extends Task<ExecutorLocation> {
     public ShuffleMapTask(int stageId, int partitionId,
                           RDD<Tuple2<K, V>> rdd, Partition partition,
                           ShuffleHandle handle) {
-        super(stageId, partitionId);
+        super(stageId, partitionId, rdd.preferredLocations(partition));
         this.rdd = rdd;
         this.partition = partition;
         this.handle = handle;

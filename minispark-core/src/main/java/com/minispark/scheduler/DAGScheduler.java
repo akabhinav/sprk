@@ -97,7 +97,23 @@ public final class DAGScheduler {
         });
     }
 
+    /** Per-running-job cancellation state. */
+    private static final class JobInfo {
+        final String group;
+        final java.util.concurrent.atomic.AtomicBoolean cancelled =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        // Stage the job is currently blocked on, so cancel can abort it.
+        final java.util.concurrent.atomic.AtomicInteger currentStageId =
+                new java.util.concurrent.atomic.AtomicInteger(-1);
+        JobInfo(String group) { this.group = group; }
+    }
+    private final Map<Integer, JobInfo> activeJobs = new java.util.concurrent.ConcurrentHashMap<>();
+
     public <T, U> List<U> runJob(RDD<T> finalRdd, ResultTask.ResultHandler<T, U> handler) {
+        return runJob(finalRdd, handler, null);
+    }
+
+    public <T, U> List<U> runJob(RDD<T> finalRdd, ResultTask.ResultHandler<T, U> handler, String group) {
         int numPartitions = finalRdd.getPartitions().size();
         int[] toCompute = new int[numPartitions];
         for (int i = 0; i < numPartitions; i++) toCompute[i] = i;
@@ -122,20 +138,52 @@ public final class DAGScheduler {
         stageIds.add(resultStage.id());
         post(new SchedulerEvent.JobStart(jobId, stageIds, now()));
 
+        JobInfo info = new JobInfo(group);
+        activeJobs.put(jobId, info);
         try {
             // Submit map stages bottom-up: each ShuffleMapStage's parents come
             // earlier in the list because they were discovered later in the recursion.
             // (We reverse to put deepest ancestors first.)
             for (int i = ancestors.size() - 1; i >= 0; i--) {
+                checkCancelled(info);
+                info.currentStageId.set(ancestors.get(i).id());
                 submitShuffleMapStage(ancestors.get(i));
             }
+            checkCancelled(info);
+            info.currentStageId.set(resultStage.id());
             List<U> result = submitResultStage(resultStage, handler);
             post(new SchedulerEvent.JobEnd(jobId, true, now()));
             return result;
         } catch (RuntimeException e) {
             post(new SchedulerEvent.JobEnd(jobId, false, now()));
             throw e;
+        } finally {
+            activeJobs.remove(jobId);
         }
+    }
+
+    private void checkCancelled(JobInfo info) {
+        if (info.cancelled.get()) {
+            throw new JobCancelledException("Job cancelled" +
+                    (info.group != null ? " (group " + info.group + ")" : ""));
+        }
+    }
+
+    /** Cancel every running job (optionally filtered to a job group). */
+    public void cancelJobs(String group) {
+        for (JobInfo info : activeJobs.values()) {
+            if (group != null && !group.equals(info.group)) continue;
+            info.cancelled.set(true);
+            int stageId = info.currentStageId.get();
+            if (stageId >= 0) {
+                taskScheduler.abortStage(stageId, "job cancelled");
+            }
+        }
+    }
+
+    /** Thrown when a job is cancelled via {@link #cancelJobs}. */
+    public static final class JobCancelledException extends RuntimeException {
+        public JobCancelledException(String message) { super(message); }
     }
 
     private void post(SchedulerEvent e) { if (listenerBus != null) listenerBus.post(e); }
@@ -146,6 +194,10 @@ public final class DAGScheduler {
                                           List<ShuffleMapStage> out,
                                           Set<Integer> visitedRdds) {
         if (!visitedRdds.add(rdd.id())) return;
+        // Lineage truncation: a checkpointed RDD reads its partitions from
+        // reliable storage in compute(), so we must NOT walk its ancestors —
+        // they don't need recomputing. This is the payoff of checkpoint().
+        if (rdd.isCheckpointed()) return;
         for (Dependency<?> dep : rdd.getDependencies()) {
             if (dep instanceof ShuffleDependency<?, ?> sd) {
                 ShuffleMapStage stage = getOrCreateShuffleMapStage(sd);

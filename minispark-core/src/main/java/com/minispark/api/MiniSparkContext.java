@@ -103,7 +103,9 @@ public final class MiniSparkContext implements AutoCloseable {
         // resolve to local lookups, so it behaves like an in-memory store while
         // keeping a single code path with the distributed case.
         ExecutorLocation driverLoc = new ExecutorLocation(rpcEnv.address().host, rpcEnv.address().port);
-        this.blockManager = new NetworkBlockManager(driverLoc, rpcEnv);
+        long maxMem = parseBytes(conf.get("minispark.memory.store.maxBytes", "536870912")); // 512 MB
+        String localDir = conf.get("minispark.local.dir", null);
+        this.blockManager = new NetworkBlockManager(driverLoc, rpcEnv, maxMem, localDir);
         String shuffleManagerName = conf.get("minispark.shuffle.manager", "hash");
         this.shuffleManager = ShuffleManagerFactory.create(
                 shuffleManagerName, blockManager, mapOutputTracker, serializer);
@@ -136,6 +138,8 @@ public final class MiniSparkContext implements AutoCloseable {
         // with the driver. The shuffle wire format depends on this matching.
         java.util.Map<String, String> executorProps = new java.util.HashMap<>();
         executorProps.put("minispark.shuffle.manager", shuffleManagerName);
+        executorProps.put("minispark.memory.store.maxBytes", String.valueOf(maxMem));
+        if (localDir != null) executorProps.put("minispark.local.dir", localDir);
 
         ExecutorLauncher launcher0;
         int totalCores;
@@ -183,6 +187,16 @@ public final class MiniSparkContext implements AutoCloseable {
 
         LOG.info("MiniSparkContext '{}' ready (master={}, rpc={}, parallelism={}, executors={})",
                 conf.appName(), conf.master(), rpcMode, totalCores, expectedExecutors);
+    }
+
+    /** Accepts a raw byte count or a suffixed value like "256m", "1g", "512k". */
+    static long parseBytes(String s) {
+        s = s.trim().toLowerCase();
+        long mult = 1;
+        if (s.endsWith("k")) { mult = 1024; s = s.substring(0, s.length() - 1); }
+        else if (s.endsWith("m")) { mult = 1024L * 1024; s = s.substring(0, s.length() - 1); }
+        else if (s.endsWith("g")) { mult = 1024L * 1024 * 1024; s = s.substring(0, s.length() - 1); }
+        return Long.parseLong(s.trim()) * mult;
     }
 
     private static int parseLocalCores(String master) {
@@ -263,11 +277,71 @@ public final class MiniSparkContext implements AutoCloseable {
         return new TextFileRDD(this, path, numPartitions);
     }
 
+    // ----- checkpointing -----
+
+    private volatile String checkpointDir;
+    private final java.util.List<RDD<?>> pendingCheckpoints =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** Set the reliable-storage directory for {@code rdd.checkpoint()}. */
+    public void setCheckpointDir(String dir) {
+        this.checkpointDir = dir;
+        try {
+            java.nio.file.Files.createDirectories(java.nio.file.Path.of(dir));
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Cannot create checkpoint dir " + dir, e);
+        }
+    }
+
+    public String checkpointDir() { return checkpointDir; }
+
+    public void registerForCheckpoint(RDD<?> rdd) { pendingCheckpoints.add(rdd); }
+
+    /** After a job, flip RDDs whose partition files now all exist to "checkpointed". */
+    private void finalizePendingCheckpoints() {
+        for (RDD<?> rdd : pendingCheckpoints) {
+            if (rdd.isCheckpointed()) { pendingCheckpoints.remove(rdd); continue; }
+            String path = rdd.checkpointPath();
+            if (path == null) { pendingCheckpoints.remove(rdd); continue; }
+            int n = rdd.getPartitions().size();
+            boolean allPresent = true;
+            for (int i = 0; i < n; i++) {
+                if (!java.nio.file.Files.exists(
+                        java.nio.file.Path.of(path, String.format("part-%05d", i)))) {
+                    allPresent = false; break;
+                }
+            }
+            if (allPresent) {
+                rdd.markCheckpointed();          // truncates lineage for future jobs
+                pendingCheckpoints.remove(rdd);
+                LOG.info("RDD {} checkpointed to {}", rdd.id(), path);
+            }
+        }
+    }
+
     // ----- job entry point used by RDD actions -----
 
     public <T, U> List<U> runJob(RDD<T> rdd, ResultTask.ResultHandler<T, U> handler) {
-        return dagScheduler.runJob(rdd, handler);
+        List<U> result = dagScheduler.runJob(rdd, handler, jobGroup.get());
+        if (!pendingCheckpoints.isEmpty()) finalizePendingCheckpoints();
+        return result;
     }
+
+    // ----- job groups & cancellation -----
+
+    // Group tag applied to jobs launched from the calling thread, so a UI button
+    // or a timeout watcher can cancel a logical group of jobs at once.
+    private final ThreadLocal<String> jobGroup = new ThreadLocal<>();
+
+    /** Tag all jobs launched from this thread with {@code groupId}. */
+    public void setJobGroup(String groupId) { jobGroup.set(groupId); }
+    public void clearJobGroup() { jobGroup.remove(); }
+
+    /** Cancel all in-flight jobs tagged with {@code groupId}. */
+    public void cancelJobGroup(String groupId) { dagScheduler.cancelJobs(groupId); }
+
+    /** Cancel every in-flight job. */
+    public void cancelAllJobs() { dagScheduler.cancelJobs(null); }
 
     @Override
     public void close() {

@@ -207,12 +207,17 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
                 pendingTasks.addAll(ts.tasks());
             }
             while (!pendingTasks.isEmpty()) {
-                ExecutorData target = null;
+                Task<?> task = pendingTasks.peek();
+                // Locality-aware placement: prefer an executor on one of the
+                // task's preferred hosts; otherwise any free executor.
+                List<LocalityScheduler.ExecutorSlot> slots = new ArrayList<>();
                 for (ExecutorData e : executors.values()) {
-                    if (e.freeCores > 0) { target = e; break; }
+                    slots.add(new LocalityScheduler.ExecutorSlot(e.id, e.location.host, e.freeCores));
                 }
-                if (target == null) break; // no capacity right now; wait for a status update
-                Task<?> task = pendingTasks.poll();
+                String chosen = LocalityScheduler.select(slots, task.preferredLocations());
+                if (chosen == null) break; // no capacity right now; wait for a status update
+                ExecutorData target = executors.get(chosen);
+                pendingTasks.poll();
                 target.freeCores--;
                 runningTasks.put(taskKey(task.stageId(), task.partitionId()), target.id);
                 byte[] bytes = serializer.serialize(task);

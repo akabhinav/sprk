@@ -162,7 +162,9 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
         // fetches shuffle blocks) + a worker MapOutputTracker that queries the
         // driver for map locations.
         ExecutorLocation loc = new ExecutorLocation(rpcEnv.address().host, rpcEnv.address().port);
-        NetworkBlockManager blockManager = new NetworkBlockManager(loc, rpcEnv);
+        long maxMem = Long.parseLong(System.getProperty("minispark.memory.store.maxBytes", "536870912"));
+        String localDir = System.getProperty("minispark.local.dir", null);
+        NetworkBlockManager blockManager = new NetworkBlockManager(loc, rpcEnv, maxMem, localDir);
         RpcEndpointRef trackerMaster = rpcEnv.endpointRef(MapOutputTracker.ENDPOINT_NAME, driverHost, driverPort);
         MapOutputTracker tracker = MapOutputTracker.worker(trackerMaster);
         // Must match the driver's choice; forwarded as a -D by the launcher.

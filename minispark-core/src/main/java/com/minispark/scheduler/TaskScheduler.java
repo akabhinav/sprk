@@ -238,6 +238,20 @@ public final class TaskScheduler {
     }
 
     /**
+     * Abort a stage immediately (used by job cancellation): complete its future
+     * exceptionally so the DAGScheduler thread blocked on {@code .get()} wakes
+     * up and unwinds. In-flight tasks will still report back but their stage
+     * book is gone, so the results are dropped.
+     */
+    public void abortStage(int stageId, String reason) {
+        StageBook book = books.remove(stageId);
+        if (book != null && !book.done.isDone()) {
+            book.done.completeExceptionally(
+                    new RuntimeException("Stage " + stageId + " aborted: " + reason));
+        }
+    }
+
+    /**
      * Periodic check: in any in-flight stage, if a significant fraction of tasks
      * have completed and any running task is much slower than the median
      * completed runtime, launch a duplicate of the straggler. The Phase-6

@@ -49,6 +49,11 @@ public abstract class RDD<T> implements Serializable {
     // Cache directive set by cache()/persist(). Travels with the RDD to executors
     // so each task knows whether to consult / populate the BlockManager.
     private StorageLevel storageLevel = StorageLevel.NONE;
+    // Checkpoint state. checkpointPath is the reliable-storage directory for this
+    // RDD's partition files (travels to executors). `checkpointed` flips true on
+    // the driver once all partition files exist, which truncates the lineage.
+    private String checkpointPath;
+    private volatile boolean checkpointed = false;
 
     protected RDD(MiniSparkContext sc) {
         this.sc = sc;
@@ -57,10 +62,42 @@ public abstract class RDD<T> implements Serializable {
     public final int id() { return id; }
     public final MiniSparkContext context() { return sc; }
     public final StorageLevel storageLevel() { return storageLevel; }
+    public final boolean isCheckpointed() { return checkpointed; }
+    final void markCheckpointed() { this.checkpointed = true; }
+    final String checkpointPath() { return checkpointPath; }
+
+    /**
+     * Mark this RDD to be checkpointed: on the next action that materializes it,
+     * each partition is written to reliable storage under
+     * {@code <checkpointDir>/rdd-<id>/part-<idx>}. After that, {@link #getDependencies}
+     * reports no parents and {@link #compute} reads the saved files — the lineage
+     * before this point is truncated, so a later failure won't recompute it.
+     *
+     * <p>Requires {@link MiniSparkContext#setCheckpointDir} to have been called.
+     *
+     * Real Spark equivalent: org.apache.spark.rdd.RDD#checkpoint (ReliableCheckpointRDD).
+     */
+    public final void checkpoint() {
+        String dir = sc.checkpointDir();
+        if (dir == null) throw new IllegalStateException(
+                "Call sc.setCheckpointDir(...) before rdd.checkpoint()");
+        this.checkpointPath = dir + java.io.File.separator + "rdd-" + id;
+        sc.registerForCheckpoint(this);
+    }
 
     public abstract List<Partition> getPartitions();
     public abstract Iterator<T> compute(Partition split, TaskContext ctx);
     public abstract List<Dependency<?>> getDependencies();
+
+    /**
+     * Hosts where this partition's data already lives, so the scheduler can try
+     * to run the task there and avoid a network fetch ("data locality"). Default
+     * is empty (no preference → run anywhere). A source RDD over a distributed
+     * file would return the hosts holding each block.
+     *
+     * Real Spark equivalent: org.apache.spark.rdd.RDD#getPreferredLocations
+     */
+    public List<String> preferredLocations(Partition split) { return List.of(); }
 
     /**
      * Shorthand for {@code persist(MEMORY_ONLY)}. After {@code cache()}, the
@@ -90,19 +127,70 @@ public abstract class RDD<T> implements Serializable {
      */
     @SuppressWarnings("unchecked")
     public final Iterator<T> iterator(Partition split, TaskContext ctx) {
-        if (storageLevel == StorageLevel.NONE) return compute(split, ctx);
-        BlockManager bm = SparkEnv.get().blockManager();
-        Serializer ser = SparkEnv.get().serializer();
-        BlockId.RDDBlock blockId = new BlockId.RDDBlock(id, split.index());
-        Optional<byte[]> hit = bm.getBlock(blockId);
-        if (hit.isPresent()) {
-            List<T> values = (List<T>) ser.deserialize(hit.get());
-            return values.iterator();
+        // 1. Checkpoint read: if a saved partition file exists, it IS the data —
+        //    serving it is what makes the truncated lineage cheap.
+        if (checkpointPath != null) {
+            java.nio.file.Path file = checkpointFile(split.index());
+            if (java.nio.file.Files.exists(file)) {
+                return readCheckpoint(file).iterator();
+            }
         }
-        List<T> materialized = new ArrayList<>();
-        compute(split, ctx).forEachRemaining(materialized::add);
-        bm.putBlock(blockId, ser.serialize((java.io.Serializable) materialized));
+
+        // 2. Cache lookup / compute.
+        List<T> materialized;
+        if (storageLevel != StorageLevel.NONE) {
+            BlockManager bm = SparkEnv.get().blockManager();
+            Serializer ser = SparkEnv.get().serializer();
+            BlockId.RDDBlock blockId = new BlockId.RDDBlock(id, split.index());
+            Optional<byte[]> hit = bm.getBlock(blockId);
+            if (hit.isPresent()) {
+                materialized = (List<T>) ser.deserialize(hit.get());
+            } else {
+                materialized = new ArrayList<>();
+                compute(split, ctx).forEachRemaining(materialized::add);
+                bm.putBlock(blockId, ser.serialize((java.io.Serializable) materialized), storageLevel);
+            }
+        } else {
+            materialized = new ArrayList<>();
+            compute(split, ctx).forEachRemaining(materialized::add);
+        }
+
+        // 3. Checkpoint write: persist this partition to reliable storage.
+        if (checkpointPath != null) {
+            writeCheckpoint(split.index(), materialized);
+        }
         return materialized.iterator();
+    }
+
+    private java.nio.file.Path checkpointFile(int partitionIndex) {
+        return java.nio.file.Path.of(checkpointPath, String.format("part-%05d", partitionIndex));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<T> readCheckpoint(java.nio.file.Path file) {
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(file);
+            return (List<T>) SparkEnv.get().serializer().deserialize(bytes);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Failed reading checkpoint " + file, e);
+        }
+    }
+
+    private void writeCheckpoint(int partitionIndex, List<T> data) {
+        try {
+            java.nio.file.Path dir = java.nio.file.Path.of(checkpointPath);
+            java.nio.file.Files.createDirectories(dir);
+            byte[] bytes = SparkEnv.get().serializer().serialize((java.io.Serializable) data);
+            // Write to a temp file then atomically move, so a concurrent reader
+            // never sees a half-written checkpoint.
+            java.nio.file.Path tmp = java.nio.file.Files.createTempFile(dir, "part-", ".tmp");
+            java.nio.file.Files.write(tmp, bytes);
+            java.nio.file.Files.move(tmp, checkpointFile(partitionIndex),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Failed writing checkpoint for partition " + partitionIndex, e);
+        }
     }
 
     /**

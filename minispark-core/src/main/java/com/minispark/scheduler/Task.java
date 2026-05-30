@@ -19,14 +19,22 @@ import java.io.Serializable;
 public abstract class Task<T> implements Serializable {
     private final int stageId;
     private final int partitionId;
+    // Hosts this task prefers to run on (data locality). Empty = run anywhere.
+    private final java.util.List<String> preferredLocations;
 
     protected Task(int stageId, int partitionId) {
+        this(stageId, partitionId, java.util.List.of());
+    }
+
+    protected Task(int stageId, int partitionId, java.util.List<String> preferredLocations) {
         this.stageId = stageId;
         this.partitionId = partitionId;
+        this.preferredLocations = preferredLocations == null ? java.util.List.of() : preferredLocations;
     }
 
     public int stageId() { return stageId; }
     public int partitionId() { return partitionId; }
+    public java.util.List<String> preferredLocations() { return preferredLocations; }
 
     /** Run on the executor. Returns the value reported back to the driver. */
     public abstract T run(TaskContext ctx);

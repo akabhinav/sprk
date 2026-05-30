@@ -27,7 +27,7 @@ public final class ResultTask<T, U> extends Task<U> {
 
     public ResultTask(int stageId, int partitionId, int outputId,
                       RDD<T> rdd, Partition partition, ResultHandler<T, U> handler) {
-        super(stageId, partitionId);
+        super(stageId, partitionId, rdd.preferredLocations(partition));
         this.rdd = rdd;
         this.partition = partition;
         this.handler = handler;
