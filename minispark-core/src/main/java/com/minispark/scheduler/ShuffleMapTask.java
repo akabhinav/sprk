@@ -39,7 +39,8 @@ public final class ShuffleMapTask<K, V> extends Task<ExecutorLocation> {
 
     @Override
     public ExecutorLocation run(TaskContext ctx) {
-        Iterator<Tuple2<K, V>> records = rdd.compute(partition, ctx);
+        // iterator() applies the RDD's cache directive if any, else falls through to compute().
+        Iterator<Tuple2<K, V>> records = rdd.iterator(partition, ctx);
         // Tasks fetch executor-local services via SparkEnv. The reference must
         // not travel inside the serialized task because each executor has its
         // own ShuffleManager / BlockManager.

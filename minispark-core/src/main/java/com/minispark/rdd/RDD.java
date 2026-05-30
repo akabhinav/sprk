@@ -1,13 +1,19 @@
 package com.minispark.rdd;
 
 import com.minispark.api.MiniSparkContext;
+import com.minispark.executor.SparkEnv;
 import com.minispark.executor.TaskContext;
+import com.minispark.serializer.Serializer;
+import com.minispark.storage.BlockId;
+import com.minispark.storage.BlockManager;
+import com.minispark.storage.StorageLevel;
 
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Function;
@@ -40,6 +46,9 @@ public abstract class RDD<T> implements Serializable {
     private final int id = ID_GEN.incrementAndGet();
     // Transient: the context is a driver-side object and must not ship to executors.
     private final transient MiniSparkContext sc;
+    // Cache directive set by cache()/persist(). Travels with the RDD to executors
+    // so each task knows whether to consult / populate the BlockManager.
+    private StorageLevel storageLevel = StorageLevel.NONE;
 
     protected RDD(MiniSparkContext sc) {
         this.sc = sc;
@@ -47,10 +56,54 @@ public abstract class RDD<T> implements Serializable {
 
     public final int id() { return id; }
     public final MiniSparkContext context() { return sc; }
+    public final StorageLevel storageLevel() { return storageLevel; }
 
     public abstract List<Partition> getPartitions();
     public abstract Iterator<T> compute(Partition split, TaskContext ctx);
     public abstract List<Dependency<?>> getDependencies();
+
+    /**
+     * Shorthand for {@code persist(MEMORY_ONLY)}. After {@code cache()}, the
+     * first task that materializes a partition writes it into the executor's
+     * BlockManager; subsequent reads on the same executor skip {@link #compute}
+     * entirely. If an executor dies, the cache dies with it, and lineage
+     * re-computes the partition next time it's needed — the "R" in RDD.
+     */
+    public final RDD<T> cache() { return persist(StorageLevel.MEMORY_ONLY); }
+
+    public final RDD<T> persist(StorageLevel level) {
+        // Mutating an existing field on an immutable-ish object is the same
+        // compromise Spark makes — cache() is a directive, not a transformation.
+        this.storageLevel = level;
+        return this;
+    }
+
+    /**
+     * The entry point tasks actually call. Wraps {@link #compute} with a
+     * BlockManager check when caching is on. Materializes the iterator into a
+     * list so the cached form is a concrete value (real Spark also has to
+     * materialize before storing, since iterators are one-shot).
+     *
+     * <p>Cache scope is per-executor: a partition cached on executor A is
+     * invisible to executor B (it'll recompute). Simple and matches the
+     * Spark default for memory-only — sufficient to teach the idea.
+     */
+    @SuppressWarnings("unchecked")
+    public final Iterator<T> iterator(Partition split, TaskContext ctx) {
+        if (storageLevel == StorageLevel.NONE) return compute(split, ctx);
+        BlockManager bm = SparkEnv.get().blockManager();
+        Serializer ser = SparkEnv.get().serializer();
+        BlockId.RDDBlock blockId = new BlockId.RDDBlock(id, split.index());
+        Optional<byte[]> hit = bm.getBlock(blockId);
+        if (hit.isPresent()) {
+            List<T> values = (List<T>) ser.deserialize(hit.get());
+            return values.iterator();
+        }
+        List<T> materialized = new ArrayList<>();
+        compute(split, ctx).forEachRemaining(materialized::add);
+        bm.putBlock(blockId, ser.serialize((java.io.Serializable) materialized));
+        return materialized.iterator();
+    }
 
     /**
      * If non-null, hints the {@link com.minispark.shuffle.Partitioner} this RDD is

@@ -72,12 +72,22 @@ public final class TextFileRDD extends RDD<String> {
         LinePartition lp = (LinePartition) split;
         try {
             RandomAccessFile raf = new RandomAccessFile(lp.path, "r");
-            raf.seek(lp.startInclusive);
-            // A partition that does not start at byte 0 cedes its partial first
-            // line to the previous partition. RandomAccessFile.readLine() works
-            // in ISO-8859-1 but for the purpose of skipping a line that's fine —
-            // we only need to land on the next newline.
-            if (lp.startInclusive != 0) raf.readLine();
+            // A partition that doesn't start at byte 0 cedes its partial first
+            // line to the previous partition — UNLESS we land exactly at the
+            // start of a line (the previous byte is '\n'), in which case the
+            // line at our start is genuinely ours and skipping it would drop a
+            // line entirely. Peek at the byte before our start to decide.
+            if (lp.startInclusive == 0) {
+                raf.seek(0);
+            } else {
+                raf.seek(lp.startInclusive - 1);
+                int prev = raf.read(); // cursor advances to startInclusive
+                if (prev != '\n') {
+                    // Mid-line: read through the remainder so the cursor sits
+                    // at the first byte of the next line.
+                    raf.readLine();
+                }
+            }
             long firstLineStart = raf.getFilePointer();
 
             return new Iterator<>() {

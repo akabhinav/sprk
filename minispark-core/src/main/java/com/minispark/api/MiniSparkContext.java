@@ -59,6 +59,7 @@ public final class MiniSparkContext implements AutoCloseable {
     private final ShuffleManager shuffleManager;
     private final TaskScheduler taskScheduler;
     private final SchedulerBackend backend;
+    private final ExecutorLauncher launcher;
     private final DAGScheduler dagScheduler;
     private final int defaultParallelism;
 
@@ -96,32 +97,35 @@ public final class MiniSparkContext implements AutoCloseable {
         int executorInstances = conf.getInt("minispark.executor.instances", 1);
         int executorCores = conf.getInt("minispark.executor.cores", cores);
 
-        ExecutorLauncher launcher;
+        ExecutorLauncher launcher0;
         int totalCores;
         int expectedExecutors;
         if (yarnMode) {
             // Executors come from a MiniYarn cluster: AM asks RM for containers,
             // NMs spawn the executor JVMs which dial back to the driver.
             int execMemoryMB = conf.getInt("minispark.executor.memoryMB", 512);
-            launcher = new YarnExecutorLauncher(rpcEnv,
+            launcher0 = new YarnExecutorLauncher(rpcEnv,
                     yarnMatch.group(1), Integer.parseInt(yarnMatch.group(2)),
                     conf.appName(), executorInstances, executorCores, execMemoryMB);
             totalCores = executorInstances * executorCores;
             expectedExecutors = executorInstances;
         } else if (rpcMode.equals("netty")) {
             // Real separate-JVM executors, locally spawned (no cluster manager).
-            launcher = new ProcessExecutorLauncher(executorInstances, executorCores);
+            launcher0 = new ProcessExecutorLauncher(executorInstances, executorCores);
             totalCores = executorInstances * executorCores;
             expectedExecutors = executorInstances;
         } else {
             // Local mode: one in-process executor with `cores` slots (Spark's model).
-            launcher = new LocalExecutorLauncher(rpcEnv, serializer, 1, cores);
+            launcher0 = new LocalExecutorLauncher(rpcEnv, serializer, 1, cores);
             totalCores = cores;
             expectedExecutors = 1;
         }
         this.defaultParallelism = totalCores;
+        this.launcher = launcher0;
+        long heartbeatTimeoutMs = conf.getInt("minispark.executor.heartbeatTimeoutMs", 5000);
         this.backend = new CoarseGrainedSchedulerBackend(
-                taskScheduler, rpcEnv, serializer, launcher, expectedExecutors, totalCores);
+                taskScheduler, rpcEnv, serializer, launcher, expectedExecutors, totalCores,
+                heartbeatTimeoutMs);
 
         this.taskScheduler.setBackend(backend);
         this.backend.start();
@@ -148,6 +152,8 @@ public final class MiniSparkContext implements AutoCloseable {
     public MiniSparkConf conf() { return conf; }
     public Serializer serializer() { return serializer; }
     public RpcEnv rpcEnv() { return rpcEnv; }
+    public SchedulerBackend backend() { return backend; }
+    public ExecutorLauncher launcher() { return launcher; }
     public BlockManager blockManager() { return blockManager; }
     public MapOutputTracker mapOutputTracker() { return mapOutputTracker; }
     public ShuffleManager shuffleManager() { return shuffleManager; }

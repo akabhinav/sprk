@@ -33,10 +33,23 @@ public final class ClusterMessages {
     public record LaunchTask(int stageId, int partitionId, byte[] taskBytes)
             implements Serializable {}
 
-    /** Executor → Driver (send): task outcome. {@code resultBytes} is the serialized return value. */
-    public record StatusUpdate(String executorId, int stageId, int partitionId,
-                               TaskState state, byte[] resultBytes, String errorMessage)
+    /**
+     * Executor → Driver (send): task outcome.
+     * {@code resultBytes} is the serialized return value on success;
+     * {@code failureReason} is the structured cause on failure (so the driver
+     * can dispatch on FetchFailed vs generic error vs executor-lost).
+     */
+    public record StatusUpdate(String executorId, int stageId, int partitionId, int attempt,
+                               TaskState state, byte[] resultBytes,
+                               TaskFailureReason failureReason)
             implements Serializable {}
+
+    /**
+     * Executor → Driver (send): "I'm still alive." The driver tracks last-seen
+     * time per executor and marks one lost if heartbeats stop. No reply: a
+     * round-trip would amplify the cost of a slow driver into stalled executors.
+     */
+    public record Heartbeat(String executorId) implements Serializable {}
 
     /** Driver self-message (send): there may be resources to offer; try to schedule. */
     public record ReviveOffers() implements Serializable {}

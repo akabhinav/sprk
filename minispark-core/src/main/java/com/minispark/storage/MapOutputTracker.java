@@ -43,8 +43,9 @@ public final class MapOutputTracker implements RpcEndpoint {
 
     // Driver-only authoritative state: shuffleId -> mapId -> status.
     private final Map<Integer, Map<Integer, MapStatus>> byShuffle = new ConcurrentHashMap<>();
-    // Worker-only cache: shuffleId -> statuses.
-    private final Map<Integer, List<MapStatus>> cache = new ConcurrentHashMap<>();
+    // No worker-side cache: a recovery on the driver may change which executor
+    // hosts a map output at any time, and a stale cache here would send the
+    // reducer back to the dead location forever. Each call asks the master.
 
     private MapOutputTracker(boolean isDriver, RpcEndpointRef masterRef) {
         this.isDriver = isDriver;
@@ -68,14 +69,36 @@ public final class MapOutputTracker implements RpcEndpoint {
 
     public void unregisterShuffle(int shuffleId) {
         byShuffle.remove(shuffleId);
-        cache.remove(shuffleId);
+    }
+
+    /**
+     * List every map output currently registered at {@code loc}, without
+     * mutating the tracker. The DAG layer uses this to enumerate which map
+     * tasks an executor's death requires re-running; the new outputs simply
+     * <i>overwrite</i> the old entries by mapId when they finish, keeping the
+     * tracker always-complete (so a concurrent reducer never sees a partial
+     * statuses list and silently drops records).
+     */
+    public synchronized List<int[]> mapsAtLocation(ExecutorLocation loc) {
+        List<int[]> found = new ArrayList<>();
+        for (Map.Entry<Integer, Map<Integer, MapStatus>> e : byShuffle.entrySet()) {
+            int shuffleId = e.getKey();
+            for (Map.Entry<Integer, MapStatus> me : e.getValue().entrySet()) {
+                if (me.getValue().location().equals(loc)) {
+                    found.add(new int[]{shuffleId, me.getKey()});
+                }
+            }
+        }
+        return found;
     }
 
     // ----- reads (driver: local; worker: ask master, cached) -----
 
     public List<MapStatus> getMapStatuses(int shuffleId) {
         if (isDriver) return localStatuses(shuffleId);
-        return cache.computeIfAbsent(shuffleId, id -> masterRef.ask(new GetMapStatuses(id)));
+        // Always ask the master; recoveries on the driver mean a snapshot we
+        // took moments ago might already point to a dead executor.
+        return masterRef.ask(new GetMapStatuses(shuffleId));
     }
 
     private synchronized List<MapStatus> localStatuses(int shuffleId) {

@@ -29,6 +29,7 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
     private final int numExecutors;
     private final int coresPerExecutor;
     private final List<Process> processes = new ArrayList<>();
+    private final java.util.Map<String, Process> byId = new java.util.concurrent.ConcurrentHashMap<>();
 
     public ProcessExecutorLauncher(int numExecutors, int coresPerExecutor) {
         this.numExecutors = numExecutors;
@@ -52,11 +53,25 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
                         .redirectOutput(ProcessBuilder.Redirect.INHERIT)
                         .start();
                 processes.add(p);
+                byId.put(execId, p);
                 LOG.info("Spawned executor JVM {} (pid {})", execId, p.pid());
             } catch (Exception e) {
                 throw new RuntimeException("Failed to launch executor process " + execId, e);
             }
         }
+    }
+
+    /**
+     * Test hook: hard-kill the named executor process. The driver's heartbeat
+     * watchdog will detect the silence and trigger the lost-executor recovery
+     * path. Used by fault-tolerance tests; not part of the production API.
+     */
+    public boolean killExecutorForTest(String executorId) {
+        Process p = byId.get(executorId);
+        if (p == null) return false;
+        LOG.warn("Test hook: killing executor process {} (pid {})", executorId, p.pid());
+        p.destroyForcibly();
+        return true;
     }
 
     @Override

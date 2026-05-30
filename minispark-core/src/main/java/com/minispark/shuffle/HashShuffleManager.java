@@ -146,10 +146,25 @@ public final class HashShuffleManager implements ShuffleManager {
             // so memory tracks "one bucket at a time" instead of the whole shuffle.
             List<Iterator<Tuple2<K, V>>> sources = new ArrayList<>();
             for (int reduceId = startPartition; reduceId < endPartition; reduceId++) {
+                final int rid = reduceId;
                 for (MapOutputTracker.MapStatus s : statuses) {
-                    BlockId.ShuffleBlock id = new BlockId.ShuffleBlock(handle.shuffleId, s.mapId(), reduceId);
-                    byte[] bytes = blockManager.getRemoteBlock(id, s.location())
-                            .orElseThrow(() -> new IllegalStateException("missing shuffle block " + id));
+                    BlockId.ShuffleBlock id = new BlockId.ShuffleBlock(handle.shuffleId, s.mapId(), rid);
+                    byte[] bytes;
+                    try {
+                        bytes = blockManager.getRemoteBlock(id, s.location())
+                                .orElseThrow(() -> new FetchFailedException(
+                                        handle.shuffleId, s.mapId(), rid, s.location(),
+                                        "missing shuffle block " + id, null));
+                    } catch (FetchFailedException ffe) {
+                        throw ffe;
+                    } catch (Exception e) {
+                        // Most commonly a RemoteRpcException because the owning executor
+                        // died — convert to a structured fetch failure so the driver can
+                        // recompute the map output instead of just retrying blindly.
+                        throw new FetchFailedException(
+                                handle.shuffleId, s.mapId(), rid, s.location(),
+                                "fetch from " + s.location() + " failed: " + e.getMessage(), e);
+                    }
                     sources.add(readBucket(bytes));
                 }
             }

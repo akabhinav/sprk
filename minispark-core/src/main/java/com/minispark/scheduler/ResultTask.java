@@ -38,6 +38,6 @@ public final class ResultTask<T, U> extends Task<U> {
 
     @Override
     public U run(TaskContext ctx) {
-        return handler.apply(ctx, rdd.compute(partition, ctx));
+        return handler.apply(ctx, rdd.iterator(partition, ctx));
     }
 }

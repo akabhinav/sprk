@@ -2,11 +2,13 @@ package com.minispark.scheduler.cluster;
 
 import com.minispark.executor.Executor;
 import com.minispark.executor.SparkEnv;
+import com.minispark.executor.TaskContext;
 import com.minispark.rpc.RpcEndpoint;
 import com.minispark.rpc.RpcEndpointRef;
 import com.minispark.rpc.RpcEnv;
 import com.minispark.serializer.JavaSerializer;
 import com.minispark.serializer.Serializer;
+import com.minispark.shuffle.FetchFailedException;
 import com.minispark.shuffle.HashShuffleManager;
 import com.minispark.shuffle.ShuffleManager;
 import com.minispark.storage.ExecutorLocation;
@@ -14,6 +16,10 @@ import com.minispark.storage.MapOutputTracker;
 import com.minispark.storage.NetworkBlockManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Executor-side endpoint. Registers with the driver, then receives
@@ -43,6 +49,12 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
     private final Serializer serializer;
     private final int cores;
     private final boolean ownsRpcEnv; // true only for the standalone-JVM case
+    private final ScheduledExecutorService heartbeater =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "executor-heartbeat");
+                t.setDaemon(true);
+                return t;
+            });
 
     public CoarseGrainedExecutorBackend(String executorId, RpcEnv rpcEnv, RpcEndpointRef driverRef,
                                         int cores, Serializer serializer, boolean ownsRpcEnv) {
@@ -69,6 +81,14 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
             throw new IllegalStateException("Executor registration rejected: " + f.reason());
         }
         LOG.info("Executor {} registered", executorId);
+        // Driver-watched liveness. Cheap (one-way send), but the lone signal
+        // the driver has that this executor's process / network is still up.
+        heartbeater.scheduleAtFixedRate(this::sendHeartbeat, 500, 1000, TimeUnit.MILLISECONDS);
+    }
+
+    private void sendHeartbeat() {
+        try { driverRef.send(new ClusterMessages.Heartbeat(executorId)); }
+        catch (Exception e) { LOG.debug("Heartbeat failed: {}", e.toString()); }
     }
 
     @Override
@@ -76,14 +96,11 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
         if (message instanceof ClusterMessages.LaunchTask lt) {
             executor.launchTask(
                     lt.taskBytes(), lt.stageId(), lt.partitionId(),
-                    (ctx, result) -> driverRef.send(new ClusterMessages.StatusUpdate(
-                            executorId, lt.stageId(), lt.partitionId(),
-                            TaskState.FINISHED, serializer.serialize(result), null)),
-                    (ctx, err) -> driverRef.send(new ClusterMessages.StatusUpdate(
-                            executorId, lt.stageId(), lt.partitionId(),
-                            TaskState.FAILED, null, String.valueOf(err))));
+                    (ctx, result) -> reportFinished(ctx, lt, result),
+                    (ctx, err) -> reportFailed(ctx, lt, err));
         } else if (message instanceof ClusterMessages.StopExecutor) {
             LOG.info("Executor {} stopping", executorId);
+            heartbeater.shutdownNow();
             executor.shutdown();
             if (ownsRpcEnv) rpcEnv.shutdown();
         } else {
@@ -91,8 +108,35 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
         }
     }
 
+    private void reportFinished(TaskContext ctx, ClusterMessages.LaunchTask lt, Object result) {
+        driverRef.send(new ClusterMessages.StatusUpdate(
+                executorId, lt.stageId(), lt.partitionId(), ctx.attemptNumber(),
+                TaskState.FINISHED, serializer.serialize(result), null));
+    }
+
+    private void reportFailed(TaskContext ctx, ClusterMessages.LaunchTask lt, Throwable err) {
+        // Unwrap to find a FetchFailedException anywhere on the cause chain;
+        // it is the one error type the driver handles structurally.
+        FetchFailedException ffe = findFetchFailed(err);
+        TaskFailureReason reason = ffe != null
+                ? new TaskFailureReason.FetchFailed(ffe.shuffleId(), ffe.mapId(), ffe.reduceId(),
+                        ffe.badLocation(), ffe.getMessage())
+                : new TaskFailureReason.GenericError(String.valueOf(err));
+        driverRef.send(new ClusterMessages.StatusUpdate(
+                executorId, lt.stageId(), lt.partitionId(), ctx.attemptNumber(),
+                TaskState.FAILED, null, reason));
+    }
+
+    private static FetchFailedException findFetchFailed(Throwable t) {
+        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            if (cur instanceof FetchFailedException ffe) return ffe;
+        }
+        return null;
+    }
+
     @Override
     public void onStop() {
+        heartbeater.shutdownNow();
         executor.shutdown();
     }
 

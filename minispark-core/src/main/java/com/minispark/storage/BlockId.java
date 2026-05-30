@@ -6,13 +6,15 @@ import java.util.Objects;
 /**
  * Stable identifier for a block stored in a {@link BlockManager}.
  *
- * <p>For Phase 2 the only kind we need is {@link ShuffleBlock} — one block
- * per (shuffle, map task, reduce partition) triple. Later phases add
- * RDDBlock (for {@code rdd.cache()}), BroadcastBlock, etc.
+ * <ul>
+ *   <li>{@link ShuffleBlock} — one block per (shuffle, map task, reduce partition).</li>
+ *   <li>{@link RDDBlock} — a cached RDD partition (one per (rddId, partitionIndex)).</li>
+ * </ul>
  *
  * Real Spark equivalent: org.apache.spark.storage.BlockId
  */
-public abstract sealed class BlockId implements Serializable permits BlockId.ShuffleBlock {
+public abstract sealed class BlockId implements Serializable
+        permits BlockId.ShuffleBlock, BlockId.RDDBlock {
 
     public abstract String name();
 
@@ -39,5 +41,23 @@ public abstract sealed class BlockId implements Serializable permits BlockId.Shu
                     && b.shuffleId == shuffleId && b.mapId == mapId && b.reduceId == reduceId;
         }
         @Override public int hashCode() { return Objects.hash(shuffleId, mapId, reduceId); }
+    }
+
+    /** {@code rdd_<rddId>_<partitionIndex>}. */
+    public static final class RDDBlock extends BlockId {
+        public final int rddId;
+        public final int partitionIndex;
+
+        public RDDBlock(int rddId, int partitionIndex) {
+            this.rddId = rddId;
+            this.partitionIndex = partitionIndex;
+        }
+
+        @Override public String name() { return "rdd_" + rddId + "_" + partitionIndex; }
+
+        @Override public boolean equals(Object o) {
+            return o instanceof RDDBlock b && b.rddId == rddId && b.partitionIndex == partitionIndex;
+        }
+        @Override public int hashCode() { return Objects.hash(rddId, partitionIndex); }
     }
 }

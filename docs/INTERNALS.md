@@ -225,8 +225,91 @@ container) + driver in one JVM but each on its own Netty port → AM requests
 JVMs that connect back → WordCount runs with the shuffle crossing the
 network → assertion verifies both `nm1` and `nm2` hosted a container.
 
-## What's next
+## Phase 6 — Harden: cache, retry, heartbeats, recovery from lineage
 
-- **Phase 6**: lineage-based recomputation on executor loss, task retry,
-  `rdd.cache()` via `BlockManager`, broadcast variables, sort shuffle,
-  speculative execution, a tiny web UI showing stages/tasks.
+This is the phase that makes the engine "Resilient" rather than just
+"Distributed". Four concerns, all wired through the seams the previous
+phases set up:
+
+**1. `rdd.cache()` / `persist()`.** A new `StorageLevel` (`NONE` or
+`MEMORY_ONLY`), a new `BlockId.RDDBlock(rddId, partitionIndex)`, and an
+`RDD.iterator()` wrapper that consults the executor's `BlockManager` before
+falling through to `compute()`. First action populates the cache; second
+action serves from it. Scope is per-executor (a partition cached on A is
+invisible to B and will recompute) — matches Spark's `MEMORY_ONLY`
+trade-off. `RDDCacheTest` pins down the "no extra compute() on the second
+action" guarantee.
+
+**2. Task retry with per-partition state.** `TaskScheduler` grew a
+`StageBook` of `PartitionState` (task, attempts so far, completed?, result).
+A failure with attempts left feeds the task back into a `retries` queue and
+re-revives offers; only after `maxAttempts` (default 4) does the stage
+abort. Duplicate completions (a winning retry racing the original) are
+ignored — first success wins.
+
+**3. Structured failures.** `StatusUpdate` carries a sealed
+`TaskFailureReason` (`GenericError`, `FetchFailed(shuffleId, mapId,
+reduceId, badLocation)`, `ExecutorLost(executorId)`) instead of a free-form
+string. The driver dispatches on the variant: `FetchFailed` is the
+distinguishing case — it's how a reducer signals "the map output I needed
+isn't there". `HashShuffleManager.HashReader` wraps `RemoteRpcException`s
+from `getRemoteBlock` into `FetchFailedException`; the executor backend
+walks the cause chain to package the structured reason.
+
+**4. Heartbeats + lost-executor detection.** Each executor sends a
+`Heartbeat(executorId)` to the driver every second. The driver's watchdog
+checks every 1s; an executor unseen for `minispark.executor.heartbeatTimeoutMs`
+(default 5s) is removed: its in-flight tasks are reported as
+`ExecutorLost` so the scheduler retries them on the survivor, and the DAG
+layer is told to scrub map outputs at that location.
+
+**Lineage recomputation — the "R" in RDD.** When `DAGScheduler.handleExecutorLost`
+or `handleFetchFailed` fires, recovery work runs on a dedicated single-thread
+`recoveryExec`. Each recovery submits a *fresh recovery TaskSet* (new stage id,
+new `StageBook`) to re-run the missing map partitions; on completion the new
+outputs overwrite the old `MapOutputTracker` entries by mapId. Two
+correctness invariants:
+- The tracker is **never partially mutated**: outputs are added/overwritten,
+  never removed first. A reducer querying mid-recovery still sees
+  `numMaps` complete entries (some may point to a dead executor → it'll
+  FetchFailed → recovery loop) rather than seeing a short list and
+  silently producing an undercount.
+- The worker-side `MapOutputTracker` does **not cache**. Every
+  `getMapStatuses` call goes to the driver, so the moment a recovery
+  updates a location, the next reduce attempt picks it up. Caching is a
+  perf optimisation; for a learning engine, the correctness clarity of
+  always-fresh lookups wins.
+
+**The race that motivates a key optimisation.** When an executor dies mid
+map stage, some map tasks may have already completed and be sitting in the
+`StageBook` waiting to be registered with the tracker — at a location that
+is now dead. We track `deadLocations` in the DAGScheduler; at registration
+time, any result whose location is in this set is rebuilt eagerly before
+publishing. Without this, every downstream reducer FetchFailed-loops
+through a serial per-mapId recovery (correct but ~16× slower in our
+test). With it, the kill-mid-job test recovers in under 5s.
+
+**Side fix:** `TextFileRDD` had a partition-boundary bug found by the
+larger fault-tolerance test — when `startInclusive` landed exactly on the
+start of a line (the byte before was `\n`), the "skip partial first line"
+logic ate a real line. Now it peeks at the previous byte to decide.
+
+**The kill-executor test** (`ExecutorFailureRecoveryTest`) is the Phase 6
+milestone: 16-partition reduceByKey with a synthetic per-task delay, 2
+executor JVMs, hard-kill one mid-map (`Process.destroyForcibly`). The
+result equals a clean run. Logs show the full chain — `killing executor
+process proc-0` → watchdog `Executor proc-0 marked lost ... abandoning N
+in-flight tasks` → tasks `ExecutorLost — retrying` → DAG `task result(s)
+landed on dead executor(s); recomputing` → stage 2 complete → correct
+output.
+
+## What's next (stretch goals from the brief)
+
+- Broadcast variables (a `BroadcastId` block kind + a fetch-once-per-executor
+  helper on top of `BlockManager`).
+- Sort-based shuffle (replace `HashShuffleManager` while keeping its
+  interface; the `ShuffleManager` seam already isolates the choice).
+- Speculative execution (re-launch a straggler before it finishes).
+- A tiny web UI showing stages, tasks, and shuffle output sizes — a
+  read-only Jetty/built-in `HttpServer` view over the `DAGScheduler`'s
+  state.
