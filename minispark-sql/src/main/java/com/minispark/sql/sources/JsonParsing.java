@@ -66,6 +66,7 @@ public final class JsonParsing implements Serializable {
             if (i >= n) break;
             if (s.charAt(i) != '"') break;
             int keyEnd = s.indexOf('"', i + 1);
+            if (keyEnd < 0) break;   // unterminated key: tolerate (PERMISSIVE) — stop parsing this line
             String key = s.substring(i + 1, keyEnd);
             i = keyEnd + 1;
             while (i < n && (Character.isWhitespace(s.charAt(i)) || s.charAt(i) == ':')) i++;
@@ -73,6 +74,7 @@ public final class JsonParsing implements Serializable {
             Object val;
             if (i < n && s.charAt(i) == '"') {
                 int valEnd = s.indexOf('"', i + 1);
+                if (valEnd < 0) { out.put(key, null); break; }  // unterminated value: null, stop
                 val = s.substring(i + 1, valEnd);
                 i = valEnd + 1;
             } else {

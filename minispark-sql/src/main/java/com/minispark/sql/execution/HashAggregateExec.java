@@ -1,15 +1,16 @@
 package com.minispark.sql.execution;
 
+import com.minispark.api.MiniSparkContext;
 import com.minispark.api.PairRDDFunctions;
 import com.minispark.api.Tuple2;
 import com.minispark.rdd.RDD;
 import com.minispark.sql.Row;
+import com.minispark.sql.execution.Keys.ValueKey;
 import com.minispark.sql.expr.Expression;
 import com.minispark.sql.expr.agg.AggregateFunction;
 import com.minispark.sql.types.StructType;
 
 import java.io.Serializable;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -20,8 +21,14 @@ import java.util.List;
  * side merges them. Then a final map evaluates each buffer to its result row
  * (grouping cols ++ aggregate results).
  *
- * <p>The grouping key is wrapped in a {@link GroupKey} with value-based
- * equals/hashCode so it partitions correctly through the hash shuffle.
+ * <p>The grouping key is a {@link Keys.ValueKey} (normalized so numeric types
+ * compare equal across Integer/Long/Double) so it partitions correctly through
+ * the hash shuffle.
+ *
+ * <p><b>Empty global aggregate:</b> a no-GROUP-BY aggregate over an empty input
+ * must still return one row (e.g. {@code SELECT count(*)} → 0). reduceByKey over
+ * an empty RDD yields nothing, so we detect the empty global case on the driver
+ * and emit a single seeded row.
  *
  * Real Spark equivalent: org.apache.spark.sql.execution.aggregate.HashAggregateExec.
  */
@@ -31,28 +38,20 @@ public final class HashAggregateExec implements PhysicalPlan {
     private final List<AggregateFunction> aggregates;
     private final StructType schema;
     private final PhysicalPlan child;
+    private final MiniSparkContext sc;
 
     public HashAggregateExec(List<Expression> groupingExprs, List<AggregateFunction> aggregates,
-                             StructType schema, PhysicalPlan child) {
+                             StructType schema, PhysicalPlan child, MiniSparkContext sc) {
         this.groupingExprs = groupingExprs;
         this.aggregates = aggregates;
         this.schema = schema;
         this.child = child;
+        this.sc = sc;
     }
 
     @Override public StructType schema() { return schema; }
     @Override public List<PhysicalPlan> children() { return List.of(child); }
     @Override public String toString() { return "HashAggregateExec " + schema; }
-
-    /** Hashable, serializable grouping key (a tuple of grouping-column values). */
-    static final class GroupKey implements Serializable {
-        final Object[] values;
-        GroupKey(Object[] values) { this.values = values; }
-        @Override public boolean equals(Object o) {
-            return o instanceof GroupKey g && java.util.Arrays.equals(values, g.values);
-        }
-        @Override public int hashCode() { return java.util.Arrays.deepHashCode(values); }
-    }
 
     /** Serializable carrier for the per-group aggregate buffers. */
     static final class Buffers implements Serializable {
@@ -66,19 +65,19 @@ public final class HashAggregateExec implements PhysicalPlan {
         List<AggregateFunction> aggs = aggregates;
 
         // 1. Map each row to (groupKey, initialized+updated single-row buffers).
-        RDD<Tuple2<GroupKey, Buffers>> pairs = child.execute().map(
-                (RDD.SerializableFunction<Row, Tuple2<GroupKey, Buffers>>) row -> {
+        RDD<Tuple2<ValueKey, Buffers>> pairs = child.execute().map(
+                (RDD.SerializableFunction<Row, Tuple2<ValueKey, Buffers>>) row -> {
                     Object[] key = new Object[groups.size()];
                     for (int i = 0; i < groups.size(); i++) key[i] = groups.get(i).eval(row);
                     Object[] b = new Object[aggs.size()];
                     for (int i = 0; i < aggs.size(); i++) {
                         b[i] = aggs.get(i).update(aggs.get(i).initialize(), row);
                     }
-                    return new Tuple2<>(new GroupKey(key), new Buffers(b));
+                    return new Tuple2<>(Keys.groupKey(key), new Buffers(b));
                 });
 
         // 2. reduceByKey merges buffers — map-side combine + shuffle + reduce-side combine.
-        RDD<Tuple2<GroupKey, Buffers>> reduced =
+        RDD<Tuple2<ValueKey, Buffers>> reduced =
                 new PairRDDFunctions<>(pairs).reduceByKey(
                         (RDD.SerializableBiFunction<Buffers, Buffers, Buffers>) (x, y) -> {
                             Object[] merged = new Object[aggs.size()];
@@ -89,13 +88,25 @@ public final class HashAggregateExec implements PhysicalPlan {
                         });
 
         // 3. Emit one result row per group: grouping cols ++ evaluated aggregates.
-        return reduced.map((RDD.SerializableFunction<Tuple2<GroupKey, Buffers>, Row>) kv -> {
+        List<Row> rows = reduced.map((RDD.SerializableFunction<Tuple2<ValueKey, Buffers>, Row>) kv -> {
             Object[] out = new Object[groups.size() + aggs.size()];
             System.arraycopy(kv._1().values, 0, out, 0, groups.size());
             for (int i = 0; i < aggs.size(); i++) {
                 out[groups.size() + i] = aggs.get(i).evaluate(kv._2().buf[i]);
             }
             return new Row(out);
-        });
+        }).collect();
+
+        // Global aggregate (no GROUP BY) over an empty input: SQL returns one
+        // seeded row (count→0, sum/avg/min/max→null), not zero rows.
+        if (rows.isEmpty() && groups.isEmpty()) {
+            Object[] out = new Object[aggs.size()];
+            for (int i = 0; i < aggs.size(); i++) out[i] = aggs.get(i).evaluate(aggs.get(i).initialize());
+            rows = List.of(new Row(out));
+        }
+        // Re-parallelize the (small, one-row-per-group) result so a parent
+        // operator keeps composing on an RDD. Aggregation already collapsed the
+        // data, so materializing here is cheap and lets us seed the empty case.
+        return sc.parallelize(rows, 1);
     }
 }

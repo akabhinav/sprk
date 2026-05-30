@@ -53,10 +53,21 @@ public final class TextFileRDD extends RDD<String> {
             List<Path> files = listDataFiles(Path.of(path));
             List<Partition> parts = new ArrayList<>();
             int idx = 0;
+            // Split the requested partition budget across files by size, so
+            // textFile(path, n) over a directory yields about n partitions total
+            // (not n per file). Each file gets at least one.
+            long totalSize = 0;
+            for (Path f : files) totalSize += Files.size(f);
             for (Path f : files) {
                 long size = Files.size(f);
-                idx = splitByBytes(f.toString(), size, n, parts, idx);
+                int perFile = (totalSize == 0) ? 1
+                        : Math.max(1, (int) Math.round((double) n * size / totalSize));
+                idx = splitByBytes(f.toString(), size, perFile, parts, idx);
             }
+            // An empty directory (or only filtered-out files) still yields one
+            // empty partition — preserving the ">=1 partition" invariant the old
+            // single-file path always held.
+            if (parts.isEmpty()) parts.add(new LinePartition(0, path, 0, 0));
             this.partitions = parts;
         } catch (IOException e) {
             throw new RuntimeException("Cannot stat " + path, e);
@@ -67,24 +78,32 @@ public final class TextFileRDD extends RDD<String> {
         if (!Files.isDirectory(p)) return List.of(p);
         try (var stream = Files.list(p)) {
             return stream.filter(Files::isRegularFile)
+                    // Skip files starting with '_' or '.' — this is exactly Spark's
+                    // hiddenFileFilter (HadoopFSUtils), which hides _SUCCESS,
+                    // _temporary, .crc, etc. Input data isn't expected to use those
+                    // prefixes, matching real Spark/Hadoop semantics.
                     .filter(f -> { String n = f.getFileName().toString();
-                                   return !n.startsWith(".") && !n.startsWith("_"); }) // skip _SUCCESS, hidden
+                                   return !n.startsWith(".") && !n.startsWith("_"); })
                     .sorted()
                     .toList();
         }
     }
 
-    /** Byte-split one file into up to {@code n} partitions, appended to {@code out}. */
+    /**
+     * Byte-split one file into exactly {@code n} partitions (the last absorbs the
+     * remainder), appended to {@code out}. Empty/short files still get one
+     * partition each; partitions beyond the file's bytes are empty ranges, which
+     * compute() handles. Exactly-n keeps textFile(file, n).getNumPartitions()==n.
+     */
     private static int splitByBytes(String path, long size, int n, List<Partition> out, int startIdx) {
         long stride = Math.max(1L, size / n);
-        long cursor = 0;
         int idx = startIdx;
-        // Always emit at least one partition per file (even an empty file).
-        do {
-            long end = (cursor + stride >= size) ? size : cursor + stride;
+        long cursor = 0;
+        for (int i = 0; i < n; i++) {
+            long end = (i == n - 1) ? size : Math.min(size, cursor + stride);
             out.add(new LinePartition(idx++, path, cursor, end));
             cursor = end;
-        } while (cursor < size);
+        }
         return idx;
     }
 

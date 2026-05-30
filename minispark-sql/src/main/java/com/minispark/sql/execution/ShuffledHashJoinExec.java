@@ -8,7 +8,6 @@ import com.minispark.sql.expr.Expression;
 import com.minispark.sql.plan.JoinType;
 import com.minispark.sql.types.StructType;
 
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -53,34 +52,26 @@ public final class ShuffledHashJoinExec implements PhysicalPlan {
     @Override public List<PhysicalPlan> children() { return List.of(left, right); }
     @Override public String toString() { return "ShuffledHashJoinExec " + joinType + " " + schema; }
 
-    /** Hashable, serializable join key. */
-    static final class JoinKey implements Serializable {
-        final Object[] values;
-        JoinKey(Object[] values) { this.values = values; }
-        @Override public boolean equals(Object o) {
-            return o instanceof JoinKey k && java.util.Arrays.equals(values, k.values);
-        }
-        @Override public int hashCode() { return java.util.Arrays.deepHashCode(values); }
-    }
-
     @Override
     public RDD<Row> execute() {
         List<Expression> lk = leftKeys, rk = rightKeys;
 
-        RDD<Tuple2<JoinKey, Row>> leftPairs = left.execute().map(
-                (RDD.SerializableFunction<Row, Tuple2<JoinKey, Row>>) row -> new Tuple2<>(key(lk, row), row));
-        RDD<Tuple2<JoinKey, Row>> rightPairs = right.execute().map(
-                (RDD.SerializableFunction<Row, Tuple2<JoinKey, Row>>) row -> new Tuple2<>(key(rk, row), row));
+        RDD<Tuple2<Keys.ValueKey, Row>> leftPairs = left.execute().map(
+                (RDD.SerializableFunction<Row, Tuple2<Keys.ValueKey, Row>>) row -> new Tuple2<>(key(lk, row), row));
+        RDD<Tuple2<Keys.ValueKey, Row>> rightPairs = right.execute().map(
+                (RDD.SerializableFunction<Row, Tuple2<Keys.ValueKey, Row>>) row -> new Tuple2<>(key(rk, row), row));
 
-        // cogroup: one entry per key with (allLeftRows, allRightRows).
-        RDD<Tuple2<JoinKey, Tuple2<List<Row>, List<Row>>>> cogrouped =
+        // cogroup: one entry per key with (allLeftRows, allRightRows). Null-key
+        // rows get a unique key (see Keys.joinKey), so they never match another
+        // row but still flow through here for OUTER joins to null-pad.
+        RDD<Tuple2<Keys.ValueKey, Tuple2<List<Row>, List<Row>>>> cogrouped =
                 new PairRDDFunctions<>(leftPairs).cogroup(rightPairs);
 
         JoinType jt = joinType;
         int lw = leftWidth, rw = rightWidth;
 
         return cogrouped.flatMap(
-                (RDD.SerializableFunction<Tuple2<JoinKey, Tuple2<List<Row>, List<Row>>>,
+                (RDD.SerializableFunction<Tuple2<Keys.ValueKey, Tuple2<List<Row>, List<Row>>>,
                         java.util.Iterator<Row>>) entry -> {
             List<Row> lefts = entry._2()._1();
             List<Row> rights = entry._2()._2();
@@ -100,10 +91,10 @@ public final class ShuffledHashJoinExec implements PhysicalPlan {
         });
     }
 
-    private static JoinKey key(List<Expression> keys, Row row) {
+    private static Keys.ValueKey key(List<Expression> keys, Row row) {
         Object[] k = new Object[keys.size()];
         for (int i = 0; i < keys.size(); i++) k[i] = keys.get(i).eval(row);
-        return new JoinKey(k);
+        return Keys.joinKey(k);
     }
 
     /** Left columns ++ right columns; a null side becomes all-null padding. */

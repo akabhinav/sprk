@@ -42,14 +42,33 @@ public final class Join implements LogicalPlan {
     public StructType schema() {
         boolean leftNullable = joinType == JoinType.RIGHT || joinType == JoinType.FULL;
         boolean rightNullable = joinType == JoinType.LEFT || joinType == JoinType.FULL;
+        // Track names already used (left side) so we can deconflict right-side
+        // columns that share a name. Without this, a join key like 'id' present
+        // on both sides becomes two fields named 'id'; StructType.indexOf returns
+        // the first match, so any by-name reference would silently bind to the
+        // left side only and the right-side column would be unreachable.
+        java.util.Set<String> seen = new java.util.HashSet<>();
         List<StructField> fields = new ArrayList<>();
         for (StructField f : left.schema().fields()) {
-            fields.add(new StructField(f.name(), f.dataType(), f.nullable() || leftNullable));
+            String name = uniqueName(f.name(), seen);
+            fields.add(new StructField(name, f.dataType(), f.nullable() || leftNullable));
+            seen.add(name);
         }
         for (StructField f : right.schema().fields()) {
-            fields.add(new StructField(f.name(), f.dataType(), f.nullable() || rightNullable));
+            String name = uniqueName(f.name(), seen);
+            fields.add(new StructField(name, f.dataType(), f.nullable() || rightNullable));
+            seen.add(name);
         }
         return new StructType(fields);
+    }
+
+    /** First-free name in the sequence {@code base, base_2, base_3, ...}. */
+    private static String uniqueName(String base, java.util.Set<String> seen) {
+        if (!seen.contains(base)) return base;
+        for (int i = 2; ; i++) {
+            String candidate = base + "_" + i;
+            if (!seen.contains(candidate)) return candidate;
+        }
     }
 
     @Override public List<LogicalPlan> children() { return List.of(left, right); }

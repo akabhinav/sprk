@@ -38,7 +38,7 @@ public final class SparkPlanner {
             return new FilterExec(f.condition(), plan(f.child()));
         }
         if (logical instanceof com.minispark.sql.plan.Aggregate a) {
-            return new HashAggregateExec(a.groupingExprs(), a.aggregates(), a.schema(), plan(a.child()));
+            return new HashAggregateExec(a.groupingExprs(), a.aggregates(), a.schema(), plan(a.child()), sc);
         }
         if (logical instanceof com.minispark.sql.plan.Join j) {
             return new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), j.joinType(), j.schema(),

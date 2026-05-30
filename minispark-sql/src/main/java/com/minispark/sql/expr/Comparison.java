@@ -37,19 +37,25 @@ public final class Comparison extends BinaryExpression {
     public Object eval(Row input) {
         Object a = left.eval(input), b = right.eval(input);
         if (a == null || b == null) return null;
-        if (op == Op.EQ) return a.equals(b);
-        if (op == Op.NE) return !a.equals(b);
+        // All six operators go through the same comparison so equality is
+        // consistent with ordering. In particular numbers are promoted (so
+        // Integer 1 == Long 1 == Double 1.0), which a raw a.equals(b) would
+        // get wrong across boxed numeric types (a column's sum() is Long, a
+        // literal is Integer, a DOUBLE column is Double).
         int cmp;
         if (a instanceof Number && b instanceof Number) {
             cmp = Double.compare(asDouble(a), asDouble(b));
-        } else if (a instanceof Comparable ca && b instanceof Comparable) {
+        } else if (a instanceof Comparable ca && b.getClass() == a.getClass()) {
             cmp = ca.compareTo(b);
         } else {
-            throw new IllegalStateException("Cannot compare " + a + " and " + b);
+            // Different non-numeric types: fall back to equality semantics only.
+            boolean eq = a.equals(b);
+            return switch (op) { case EQ -> eq; case NE -> !eq;
+                default -> throw new IllegalStateException("Cannot compare " + a + " and " + b); };
         }
         return switch (op) {
+            case EQ -> cmp == 0; case NE -> cmp != 0;
             case LT -> cmp < 0; case LE -> cmp <= 0; case GT -> cmp > 0; case GE -> cmp >= 0;
-            default -> false;
         };
     }
 

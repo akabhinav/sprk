@@ -103,17 +103,115 @@ public final class SqlParser {
 
         expect(TokenType.EOF, "end of statement");
 
-        LogicalPlan result = buildProjectOrAggregate(items, groupBy, plan);
-        if (having != null) {
-            // HAVING runs after aggregation: any aggregate call in it (e.g.
-            // sum(amount)) is already an output column of the Aggregate, so
-            // rewrite the marker into a reference to that column by name.
-            result = new Filter(rewriteHavingAggregates(having), result);
+        // --- Decide aggregate vs plain projection ---
+        // An aggregate query is one where any aggregate call appears anywhere in
+        // SELECT/HAVING/ORDER BY, OR a GROUP BY clause was given. We must scan
+        // the full expression trees (not just the top-level), so e.g.
+        // `SELECT sum(x) + 1` is detected as an aggregate.
+        boolean hasAgg = !groupBy.isEmpty();
+        for (SelectItem it : items) if (it.expr != null && containsAggregate(it.expr)) hasAgg = true;
+        if (having != null && containsAggregate(having)) hasAgg = true;
+        for (var so : orderBy) if (containsAggregate(so.expr())) hasAgg = true;
+
+        LogicalPlan result;
+        if (!hasAgg) {
+            // Plain projection path: SELECT expressions become the project list.
+            List<Expression> proj = new ArrayList<>();
+            for (SelectItem it : items) {
+                if (it.star) proj.add(new com.minispark.sql.expr.Star());
+                else proj.add(it.alias != null ? new Alias(it.expr, it.alias) : it.expr);
+            }
+            result = new Project(proj, plan);
+            if (having != null) {
+                throw new ParseException("HAVING requires GROUP BY or aggregate functions");
+            }
+            if (!orderBy.isEmpty()) result = new com.minispark.sql.plan.Sort(orderBy, result);
+        } else {
+            // Aggregate path: gather every aggregate referenced in SELECT, HAVING,
+            // and ORDER BY into one Aggregate node; SELECT/HAVING/ORDER BY are
+            // rewritten so their aggregate references point at the Aggregate's
+            // output columns by name. Non-aggregate SELECT items must be in the
+            // GROUP BY list (or, if none was given, an error — they have no
+            // single value per group).
+            List<AggregateFunction> aggs = new ArrayList<>();
+            List<String> aggNames = new ArrayList<>();
+            // SELECT: classify each item.
+            List<Expression> projectExprs = new ArrayList<>();
+            for (SelectItem it : items) {
+                if (it.star) {
+                    throw new ParseException("SELECT * is not allowed with GROUP BY / aggregates");
+                }
+                // A non-aggregate SELECT item must reference a grouping expression.
+                if (!containsAggregate(it.expr)) {
+                    if (groupBy.isEmpty()) {
+                        throw new ParseException("column '" + it.expr
+                                + "' must appear in GROUP BY or be inside an aggregate");
+                    }
+                    if (!groupingContains(groupBy, it.expr)) {
+                        throw new ParseException("column '" + it.expr
+                                + "' is not in GROUP BY and not inside an aggregate");
+                    }
+                }
+                Expression rewritten = rewriteAggregates(it.expr, aggs, aggNames);
+                projectExprs.add(it.alias != null ? new Alias(rewritten, it.alias) : rewritten);
+            }
+            // HAVING & ORDER BY: rewrite same way so they reference aggregate outputs.
+            Expression havingExpr = having == null ? null : rewriteAggregates(having, aggs, aggNames);
+            List<com.minispark.sql.plan.SortOrder> rewrittenOrder = new ArrayList<>();
+            for (var so : orderBy) {
+                rewrittenOrder.add(new com.minispark.sql.plan.SortOrder(
+                        rewriteAggregates(so.expr(), aggs, aggNames), so.ascending()));
+            }
+            result = new Aggregate(new ArrayList<>(groupBy), aggs, plan);
+            if (havingExpr != null) result = new Filter(havingExpr, result);
+            result = new Project(projectExprs, result);
+            if (!rewrittenOrder.isEmpty()) result = new com.minispark.sql.plan.Sort(rewrittenOrder, result);
         }
         if (distinct) result = new com.minispark.sql.plan.Distinct(result);
-        if (!orderBy.isEmpty()) result = new com.minispark.sql.plan.Sort(orderBy, result);
         if (limit >= 0) result = new com.minispark.sql.plan.Limit(limit, result);
         return result;
+    }
+
+    /** Whether {@code e} (or any descendant) is an aggregate call. */
+    private boolean containsAggregate(Expression e) {
+        if (e instanceof AggMarker) return true;
+        for (Expression c : e.children()) if (containsAggregate(c)) return true;
+        return false;
+    }
+
+    /**
+     * Whether {@code col} appears verbatim (by toString) in {@code groupBy}.
+     * This is conservative — a SELECT expression matches a GROUP BY only when
+     * they're textually the same — which is enough for our simple grammar
+     * (column refs and aliases-of-column-refs).
+     */
+    private boolean groupingContains(List<Expression> groupBy, Expression col) {
+        String s = col.toString();
+        for (Expression g : groupBy) if (g.toString().equals(s)) return true;
+        return false;
+    }
+
+    /**
+     * Walk an expression replacing every {@link AggMarker} with an
+     * {@link UnresolvedAttribute} that references the aggregate's output column
+     * by name (e.g. {@code sum(amount)}). Aggregates are deduped by output name
+     * across all callers (SELECT/HAVING/ORDER BY share one list).
+     */
+    private Expression rewriteAggregates(Expression e,
+                                         List<AggregateFunction> aggs, List<String> aggNames) {
+        if (e instanceof AggMarker m) {
+            String name = m.fn.name();
+            if (!aggNames.contains(name)) {
+                aggNames.add(name);
+                aggs.add(m.fn);
+            }
+            return new UnresolvedAttribute(name);
+        }
+        List<Expression> children = e.children();
+        if (children.isEmpty()) return e;
+        List<Expression> rewritten = new ArrayList<>(children.size());
+        for (Expression c : children) rewritten.add(rewriteAggregates(c, aggs, aggNames));
+        return e.withChildren(rewritten);
     }
 
     /**
@@ -169,21 +267,6 @@ public final class SqlParser {
 
     private boolean consume() { advance(); return true; }
 
-    /**
-     * Replace every {@link AggMarker} in a HAVING predicate with an
-     * {@link UnresolvedAttribute} referencing the aggregate's output column
-     * (e.g. {@code sum(amount)}), since by the time HAVING's Filter runs the
-     * aggregation has already produced that column.
-     */
-    private Expression rewriteHavingAggregates(Expression e) {
-        if (e instanceof AggMarker m) return new UnresolvedAttribute(m.fn.name());
-        List<Expression> children = e.children();
-        if (children.isEmpty()) return e;
-        List<Expression> rewritten = new ArrayList<>(children.size());
-        for (Expression c : children) rewritten.add(rewriteHavingAggregates(c));
-        return e.withChildren(rewritten);
-    }
-
     /** One ORDER BY term: expr followed by optional ASC/DESC. */
     private com.minispark.sql.plan.SortOrder sortItem() {
         Expression e = expression();
@@ -191,36 +274,6 @@ public final class SqlParser {
         if (peekKeyword("ASC")) advance();
         else if (peekKeyword("DESC")) { advance(); asc = false; }
         return new com.minispark.sql.plan.SortOrder(e, asc);
-    }
-
-    /** Decide between a plain projection and an aggregation based on the select list. */
-    private LogicalPlan buildProjectOrAggregate(List<SelectItem> items,
-                                                List<Expression> groupBy, LogicalPlan child) {
-        boolean hasAgg = false;
-        for (SelectItem it : items) if (it.expr instanceof AggMarker) hasAgg = true;
-
-        if (!hasAgg && groupBy.isEmpty()) {
-            // SELECT a, *, b → a Star expression the analyzer expands to all input columns.
-            List<Expression> proj = new ArrayList<>();
-            for (SelectItem it : items) {
-                if (it.star) { proj.add(new com.minispark.sql.expr.Star()); }
-                else proj.add(it.alias != null ? new Alias(it.expr, it.alias) : it.expr);
-            }
-            return new Project(proj, child);
-        }
-
-        // Aggregation: grouping exprs are the non-aggregate select items (plus any
-        // explicit GROUP BY), aggregates are the AggMarker items.
-        List<Expression> grouping = new ArrayList<>(groupBy);
-        List<AggregateFunction> aggs = new ArrayList<>();
-        for (SelectItem it : items) {
-            if (it.expr instanceof AggMarker m) {
-                aggs.add(m.fn);
-            } else if (!it.star && groupBy.isEmpty()) {
-                grouping.add(it.expr);
-            }
-        }
-        return new Aggregate(grouping, aggs, child);
     }
 
     private List<SelectItem> selectItems() {
