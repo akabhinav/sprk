@@ -21,7 +21,8 @@ import java.util.List;
 public final class MiniSparkSession implements AutoCloseable {
 
     private final MiniSparkContext sc;
-    private final Analyzer analyzer = new Analyzer();
+    private final com.minispark.sql.analysis.Catalog catalog = new com.minispark.sql.analysis.Catalog();
+    private final Analyzer analyzer = new Analyzer(catalog);
     private final Optimizer optimizer = new Optimizer();
     private final SparkPlanner planner;
     private final int numPartitions;
@@ -64,6 +65,18 @@ public final class MiniSparkSession implements AutoCloseable {
             }
         }
         return new DataFrame(this, new LocalRelation(schema, rows));
+    }
+
+    /** Register {@code df}'s plan as a temp view, so {@code sql("... FROM name")} resolves it. */
+    public void createOrReplaceTempView(String name, DataFrame df) {
+        catalog.registerView(name, df.logicalPlan());
+    }
+
+    /** Parse and run a SQL string against the registered temp views. */
+    public DataFrame sql(String sqlText) {
+        com.minispark.sql.plan.LogicalPlan parsed =
+                com.minispark.sql.parser.SqlParser.parsePlan(sqlText);
+        return new DataFrame(this, parsed);
     }
 
     @Override public void close() { sc.close(); }

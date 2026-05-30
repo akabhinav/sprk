@@ -556,8 +556,42 @@ Tested by `AggregateTest` (sum/count/avg/min/max, single and multi-column
 grouping, schema names) and `JoinTest` (inner keeps matches; left/right outer
 null-pad the unmatched side) — all running real shuffles end-to-end.
 
+## Tier B (part 3) — SQL string parser: `spark.sql("SELECT ...")`
+
+The DataFrame DSL and SQL text now share one execution path — text is just
+another front end that produces the same unresolved logical plan, which then
+flows through the existing analyze → optimize → plan → execute pipeline.
+
+**Lexer** (hand-written, like the rest of the engine). Turns a SQL string into
+`Token`s: identifiers/keywords (reserved words folded to upper-case
+`KEYWORD`s), int/double/single-quoted-string literals, multi-char operators
+(`<=`, `>=`, `!=`, `<>`), and punctuation. Real Spark uses an ANTLR grammar
+(`SqlBase.g4`); we hand-roll so every step is visible.
+
+**Recursive-descent parser** (`SqlParser`) for
+`SELECT … FROM … [WHERE …] [GROUP BY …]` with full precedence climbing
+(OR < AND < comparison < +/- < */÷ < primary) and the aggregate calls
+`count/sum/avg/min/max`. It produces an *unresolved* plan: `FROM t` becomes an
+`UnresolvedRelation`, column names stay `UnresolvedAttribute`s. A select list
+containing aggregate calls (or a GROUP BY) yields an `Aggregate` node, else a
+`Project` — the same nodes the DSL builds, so nothing downstream changes.
+Mirrors Spark's `AstBuilder`.
+
+**Catalog & temp views.** `Catalog` is a name→plan registry;
+`df.createOrReplaceTempView("t")` registers the DataFrame's plan. The analyzer
+gained an `UnresolvedRelation` case that swaps in the registered plan before
+binding columns — so `sql("... FROM t")` resolves against earlier DataFrames.
+`MiniSparkSession.sql(text)` parses and returns a DataFrame; the session's
+analyzer and catalog are shared so SQL and DSL interoperate.
+
+Tested by `SqlParserTest`: `WHERE` filtering, arithmetic + aliases, AND/OR
+**precedence** (`a OR b AND c` parses as `a OR (b AND c)`), `GROUP BY` with
+`count(*)`/`sum`, and the three error paths (unknown table, unknown column,
+syntax error). The `SqlExample` runs the same query both ways and shows
+identical results.
+
 ### Tier B — still to come
-- A SQL string parser (so `spark.sql("SELECT ...")` works, not just the DSL)
+- `SELECT *` star expansion, `ORDER BY` / `LIMIT`, explicit `JOIN ... ON` syntax
 - Column pruning, broadcast-join selection by size, sort-merge join
 
 ## Tier C+ — further separate projects

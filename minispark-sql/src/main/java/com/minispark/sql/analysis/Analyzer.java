@@ -26,7 +26,19 @@ import java.util.List;
  */
 public final class Analyzer {
 
+    private final Catalog catalog;
+
+    public Analyzer() { this(new Catalog()); }
+    public Analyzer(Catalog catalog) { this.catalog = catalog; }
+
+    public Catalog catalog() { return catalog; }
+
     public LogicalPlan analyze(LogicalPlan plan) {
+        // Resolve a FROM-table reference against the catalog before anything else,
+        // so the substituted relation's schema is available to parents.
+        if (plan instanceof com.minispark.sql.plan.UnresolvedRelation u) {
+            return analyze(catalog.lookup(u.tableName()));
+        }
         // Resolve children first.
         List<LogicalPlan> newChildren = new ArrayList<>();
         for (LogicalPlan c : plan.children()) newChildren.add(analyze(c));

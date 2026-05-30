@@ -34,8 +34,21 @@ public final class DataFrame {
 
     public LogicalPlan logicalPlan() { return logicalPlan; }
 
-    /** The schema this DataFrame produces (computed from the logical plan). */
-    public StructType schema() { return logicalPlan.schema(); }
+    /** Register this DataFrame as a temp view for {@code spark.sql("... FROM name")}. */
+    public void createOrReplaceTempView(String name) {
+        session.createOrReplaceTempView(name, this);
+    }
+
+    /**
+     * The schema this DataFrame produces. Analyzes first so it works on plans
+     * built from SQL text (which contain unresolved table/column references
+     * until the analyzer binds them).
+     */
+    public StructType schema() {
+        return logicalPlan.resolved()
+                ? logicalPlan.schema()
+                : session.analyzer().analyze(logicalPlan).schema();
+    }
 
     // ----- transformations (lazy) -----
 

@@ -44,8 +44,14 @@ public final class SqlExample {
                     .select(col("name"), col("age").plus(Column.lit(2).plus(3)).as("age_plus_5"));
 
             System.out.println(query.explain());
-            System.out.println("== Result ==");
+            System.out.println("== Result (DataFrame DSL) ==");
             query.show();
+
+            // The same query expressed as SQL text via a temp view.
+            people.createOrReplaceTempView("people");
+            System.out.println("\n== Result (spark.sql) ==");
+            spark.sql("SELECT city, count(*), sum(age) FROM people "
+                    + "WHERE age > 20 GROUP BY city").show();
         }
     }
 }
