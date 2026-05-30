@@ -13,9 +13,19 @@ public interface BlockManager {
     /** Where this manager lives. */
     ExecutorLocation location();
 
+    /** Store a block at the default (memory, pinned) level. */
     void putBlock(BlockId id, byte[] data);
 
-    /** Local lookup only. */
+    /**
+     * Store a block honoring a {@link StorageLevel}: memory (bounded, may evict),
+     * disk, or both. The default ignores the level and behaves like
+     * {@link #putBlock(BlockId, byte[])}; tiering implementations override.
+     */
+    default void putBlock(BlockId id, byte[] data, StorageLevel level) {
+        putBlock(id, data);
+    }
+
+    /** Local lookup only (checks every local tier). */
     Optional<byte[]> getBlock(BlockId id);
 
     /**
