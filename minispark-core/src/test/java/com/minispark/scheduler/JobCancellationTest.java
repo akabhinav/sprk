@@ -6,7 +6,6 @@ import com.minispark.rdd.RDD;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -18,6 +17,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * A long-running job, cancelled from another thread, should fail fast rather
  * than run to completion.
+ *
+ * <p>Note we cannot use a {@code CountDownLatch} captured in the task closure to
+ * detect "task started": closures are serialized before they run (even in local
+ * mode), so the executor would count down a <i>clone</i> of the latch, not the
+ * driver's. Instead we sleep a fixed, generous interval before cancelling — far
+ * shorter than the task's own sleep, so the cancel still lands mid-flight.
  */
 final class JobCancellationTest {
 
@@ -26,7 +31,6 @@ final class JobCancellationTest {
         try (MiniSparkContext sc = new MiniSparkContext(
                 new MiniSparkConf().setMaster("local[2]"))) {
 
-            CountDownLatch started = new CountDownLatch(1);
             AtomicReference<Throwable> caught = new AtomicReference<>();
 
             ExecutorService bg = Executors.newSingleThreadExecutor();
@@ -34,9 +38,8 @@ final class JobCancellationTest {
                 try {
                     sc.parallelize(List.of(1, 2, 3, 4), 4)
                             .map((RDD.SerializableFunction<Integer, Integer>) i -> {
-                                started.countDown();
                                 // Long enough that the cancel lands mid-flight.
-                                try { Thread.sleep(20_000); } catch (InterruptedException e) {
+                                try { Thread.sleep(30_000); } catch (InterruptedException e) {
                                     Thread.currentThread().interrupt();
                                 }
                                 return i;
@@ -47,11 +50,11 @@ final class JobCancellationTest {
                 }
             });
 
-            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
-            Thread.sleep(200); // let tasks be in-flight
+            // Give the job time to submit its stage and get tasks in-flight.
+            Thread.sleep(1000);
             sc.cancelAllJobs();
 
-            // The blocked collect() must return (throwing) well before the 20s sleep.
+            // The blocked collect() must return (throwing) well before the 30s sleep.
             job.get(10, TimeUnit.SECONDS);
             bg.shutdownNow();
 
