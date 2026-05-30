@@ -20,6 +20,9 @@ import com.minispark.serializer.JavaSerializer;
 import com.minispark.serializer.Serializer;
 import com.minispark.shuffle.ShuffleManager;
 import com.minispark.shuffle.ShuffleManagerFactory;
+import com.minispark.status.AppStatusStore;
+import com.minispark.status.LiveListenerBus;
+import com.minispark.ui.MiniSparkUI;
 import com.minispark.storage.BlockManager;
 import com.minispark.storage.ExecutorLocation;
 import com.minispark.storage.BlockId;
@@ -66,6 +69,9 @@ public final class MiniSparkContext implements AutoCloseable {
     private final SchedulerBackend backend;
     private final ExecutorLauncher launcher;
     private final DAGScheduler dagScheduler;
+    private final LiveListenerBus listenerBus;
+    private final AppStatusStore statusStore;
+    private final MiniSparkUI ui; // null unless minispark.ui.enabled=true
     private final int defaultParallelism;
     // Static so broadcast ids are unique across all contexts in a JVM. The
     // executor-side TorrentBroadcast cache is keyed by id, so a per-context
@@ -101,6 +107,12 @@ public final class MiniSparkContext implements AutoCloseable {
 
         // The driver's SparkEnv. In local mode the in-process executors share it.
         SparkEnv.set(new SparkEnv(shuffleManager, blockManager, mapOutputTracker, serializer));
+
+        // Event bus + status store feed the (optional) web UI. The scheduler and
+        // backend post events; the store accumulates them; the UI renders the store.
+        this.listenerBus = new LiveListenerBus();
+        this.statusStore = new AppStatusStore();
+        listenerBus.addListener(statusStore);
 
         this.taskScheduler = new TaskScheduler();
 
@@ -140,12 +152,22 @@ public final class MiniSparkContext implements AutoCloseable {
         long heartbeatTimeoutMs = conf.getInt("minispark.executor.heartbeatTimeoutMs", 5000);
         this.backend = new CoarseGrainedSchedulerBackend(
                 taskScheduler, rpcEnv, serializer, launcher, expectedExecutors, totalCores,
-                heartbeatTimeoutMs);
+                heartbeatTimeoutMs, listenerBus);
 
         this.taskScheduler.setBackend(backend);
         this.backend.start();
 
-        this.dagScheduler = new DAGScheduler(taskScheduler, mapOutputTracker);
+        this.dagScheduler = new DAGScheduler(taskScheduler, mapOutputTracker, listenerBus);
+
+        // Web UI: off by default (so tests don't bind ports); port 0 = ephemeral.
+        if (conf.get("minispark.ui.enabled", "false").equalsIgnoreCase("true")) {
+            String uiHost = conf.get("minispark.ui.host", "127.0.0.1");
+            int uiPort = conf.getInt("minispark.ui.port", 4040);
+            this.ui = new MiniSparkUI(conf.appName(), statusStore, uiHost, uiPort);
+        } else {
+            this.ui = null;
+        }
+
         LOG.info("MiniSparkContext '{}' ready (master={}, rpc={}, parallelism={}, executors={})",
                 conf.appName(), conf.master(), rpcMode, totalCores, expectedExecutors);
     }
@@ -169,6 +191,9 @@ public final class MiniSparkContext implements AutoCloseable {
     public RpcEnv rpcEnv() { return rpcEnv; }
     public SchedulerBackend backend() { return backend; }
     public ExecutorLauncher launcher() { return launcher; }
+    public AppStatusStore statusStore() { return statusStore; }
+    /** The web UI's bound port, or -1 if the UI is disabled. */
+    public int uiPort() { return ui == null ? -1 : ui.boundPort(); }
     public BlockManager blockManager() { return blockManager; }
     public MapOutputTracker mapOutputTracker() { return mapOutputTracker; }
     public ShuffleManager shuffleManager() { return shuffleManager; }
@@ -215,6 +240,8 @@ public final class MiniSparkContext implements AutoCloseable {
     @Override
     public void close() {
         backend.stop();
+        if (ui != null) ui.stop();
+        listenerBus.stop();
         LOG.info("MiniSparkContext '{}' stopped", conf.appName());
     }
 }

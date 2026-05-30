@@ -5,6 +5,8 @@ import com.minispark.rdd.Partition;
 import com.minispark.rdd.RDD;
 import com.minispark.rdd.ShuffleDependency;
 import com.minispark.scheduler.cluster.TaskFailureReason;
+import com.minispark.status.LiveListenerBus;
+import com.minispark.status.SchedulerEvent;
 import com.minispark.storage.ExecutorLocation;
 import com.minispark.storage.MapOutputTracker;
 import org.slf4j.Logger;
@@ -44,7 +46,9 @@ public final class DAGScheduler {
 
     private final TaskScheduler taskScheduler;
     private final MapOutputTracker mapOutputTracker; // the driver-side master
+    private final LiveListenerBus listenerBus;
     private final AtomicInteger stageIdGen = new AtomicInteger();
+    private final AtomicInteger jobIdGen = new AtomicInteger();
 
     // Memoize ShuffleMapStages keyed by shuffleId so a shuffle reused by two
     // downstream stages doesn't get rematerialized.
@@ -75,9 +79,11 @@ public final class DAGScheduler {
         return ((long) stageId << 32) | (partitionId & 0xffffffffL);
     }
 
-    public DAGScheduler(TaskScheduler taskScheduler, MapOutputTracker mapOutputTracker) {
+    public DAGScheduler(TaskScheduler taskScheduler, MapOutputTracker mapOutputTracker,
+                        LiveListenerBus listenerBus) {
         this.taskScheduler = taskScheduler;
         this.mapOutputTracker = mapOutputTracker;
+        this.listenerBus = listenerBus;
         // The scheduler routes structural failures and executor-lost events here
         // so we can run the recovery loop that gives RDDs their "Resilient" R.
         taskScheduler.setDAGEventHandler(new TaskScheduler.DAGEventHandler() {
@@ -110,16 +116,30 @@ public final class DAGScheduler {
         LOG.info("Job: result stage {} with {} parent shuffle stages",
                 resultStage.id(), ancestors.size());
 
-        // Submit map stages bottom-up: each ShuffleMapStage's parents come
-        // earlier in the list because they were discovered later in the recursion.
-        // (We reverse to put deepest ancestors first.)
-        for (int i = ancestors.size() - 1; i >= 0; i--) {
-            ShuffleMapStage s = ancestors.get(i);
-            submitShuffleMapStage(s);
-        }
+        int jobId = jobIdGen.incrementAndGet();
+        List<Integer> stageIds = new ArrayList<>();
+        for (ShuffleMapStage s : ancestors) stageIds.add(s.id());
+        stageIds.add(resultStage.id());
+        post(new SchedulerEvent.JobStart(jobId, stageIds, now()));
 
-        return submitResultStage(resultStage, handler);
+        try {
+            // Submit map stages bottom-up: each ShuffleMapStage's parents come
+            // earlier in the list because they were discovered later in the recursion.
+            // (We reverse to put deepest ancestors first.)
+            for (int i = ancestors.size() - 1; i >= 0; i--) {
+                submitShuffleMapStage(ancestors.get(i));
+            }
+            List<U> result = submitResultStage(resultStage, handler);
+            post(new SchedulerEvent.JobEnd(jobId, true, now()));
+            return result;
+        } catch (RuntimeException e) {
+            post(new SchedulerEvent.JobEnd(jobId, false, now()));
+            throw e;
+        }
     }
+
+    private void post(SchedulerEvent e) { if (listenerBus != null) listenerBus.post(e); }
+    private static long now() { return System.currentTimeMillis(); }
 
     /** DFS the RDD lineage, registering a ShuffleMapStage for each ShuffleDependency seen. */
     private void discoverShuffleAncestors(RDD<?> rdd,
@@ -172,13 +192,16 @@ public final class DAGScheduler {
             liveTasks.put(taskKey(stage.id(), p.index()), t);
         }
         LOG.info("Submitting ShuffleMapStage {}: {} map tasks", stage.id(), tasks.size());
+        post(new SchedulerEvent.StageSubmitted(stage.id(), "ShuffleMapStage", tasks.size(), now()));
         int shuffleId = stage.shuffleDep().shuffleId();
         List<TaskResult<?>> results;
         try {
             results = taskScheduler.submitTasks(new TaskSet(stage.id(), tasks)).get();
         } catch (Exception e) {
+            post(new SchedulerEvent.StageCompleted(stage.id(), false, now()));
             throw new RuntimeException("ShuffleMapStage " + stage.id() + " failed", e);
         }
+        post(new SchedulerEvent.StageCompleted(stage.id(), true, now()));
         // Register each completed map task's output location with the master
         // tracker. Reducers (possibly in other JVMs) query this to find and
         // fetch their buckets. This must happen before any dependent stage runs.
@@ -305,13 +328,16 @@ public final class DAGScheduler {
             liveTasks.put(taskKey(stage.id(), pIdx), t);
         }
         LOG.info("Submitting ResultStage {}: {} result tasks", stage.id(), tasks.size());
+        post(new SchedulerEvent.StageSubmitted(stage.id(), "ResultStage", tasks.size(), now()));
 
         List<TaskResult<?>> results;
         try {
             results = taskScheduler.submitTasks(new TaskSet(stage.id(), tasks)).get();
         } catch (Exception e) {
+            post(new SchedulerEvent.StageCompleted(stage.id(), false, now()));
             throw new RuntimeException("ResultStage " + stage.id() + " failed", e);
         }
+        post(new SchedulerEvent.StageCompleted(stage.id(), true, now()));
 
         // Order by partitionId so the caller sees deterministic ordering.
         U[] arr = (U[]) new Object[toCompute.length];

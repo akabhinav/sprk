@@ -8,6 +8,8 @@ import com.minispark.scheduler.Task;
 import com.minispark.scheduler.TaskScheduler;
 import com.minispark.scheduler.TaskSet;
 import com.minispark.serializer.Serializer;
+import com.minispark.status.LiveListenerBus;
+import com.minispark.status.SchedulerEvent;
 import com.minispark.storage.ExecutorLocation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,6 +62,7 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
     private final int expectedExecutors;
     private final int totalCores;
     private final long heartbeatTimeoutMs;
+    private final LiveListenerBus listenerBus;
 
     private final DriverEndpoint driverEndpoint = new DriverEndpoint();
     private RpcEndpointRef driverRef;
@@ -93,7 +96,7 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
 
     public CoarseGrainedSchedulerBackend(TaskScheduler scheduler, RpcEnv rpcEnv, Serializer serializer,
                                          ExecutorLauncher launcher, int expectedExecutors, int totalCores,
-                                         long heartbeatTimeoutMs) {
+                                         long heartbeatTimeoutMs, LiveListenerBus listenerBus) {
         this.scheduler = scheduler;
         this.rpcEnv = rpcEnv;
         this.serializer = serializer;
@@ -101,8 +104,11 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
         this.expectedExecutors = expectedExecutors;
         this.totalCores = totalCores;
         this.heartbeatTimeoutMs = heartbeatTimeoutMs;
+        this.listenerBus = listenerBus;
         this.registrationLatch = new CountDownLatch(expectedExecutors);
     }
+
+    private void post(SchedulerEvent e) { if (listenerBus != null) listenerBus.post(e); }
 
     @Override
     public void start() {
@@ -167,6 +173,7 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
         }
         LOG.warn("Executor {} marked lost: {} (abandoning {} in-flight tasks)",
                 execId, reason, abandoned.size());
+        post(new SchedulerEvent.ExecutorRemoved(execId, reason, System.currentTimeMillis()));
         for (Long key : abandoned) {
             runningTasks.remove(key);
             int stageId = (int) (key >> 32);
@@ -211,6 +218,8 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
                 byte[] bytes = serializer.serialize(task);
                 LOG.debug("Launching task {}/{} on executor {}",
                         task.stageId(), task.partitionId(), target.id);
+                post(new SchedulerEvent.TaskStart(task.stageId(), task.partitionId(),
+                        target.id, System.currentTimeMillis()));
                 target.ref.send(new ClusterMessages.LaunchTask(task.stageId(), task.partitionId(), bytes));
             }
         }
@@ -241,6 +250,8 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
                 }
                 LOG.info("Registered executor {} at {}:{} ({} cores)",
                         reg.executorId(), reg.host(), reg.port(), reg.cores());
+                post(new SchedulerEvent.ExecutorAdded(reg.executorId(), reg.host(), reg.port(),
+                        reg.cores(), System.currentTimeMillis()));
                 registrationLatch.countDown();
                 driverRef.send(new ClusterMessages.ReviveOffers());
                 return new ClusterMessages.RegisteredExecutor();
@@ -272,6 +283,8 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
                     if (e != null) e.freeCores++;
                 }
             }
+            post(new SchedulerEvent.TaskEnd(su.stageId(), su.partitionId(),
+                    su.state() == TaskState.FINISHED, System.currentTimeMillis()));
             if (su.state() == TaskState.FINISHED) {
                 Object result = su.resultBytes() == null ? null : serializer.deserialize(su.resultBytes());
                 scheduler.taskCompleted(su.stageId(), su.partitionId(), result);

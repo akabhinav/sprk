@@ -350,9 +350,49 @@ Proven by: `SortShuffleTest` (sort result == hash result for the same job, in
 local mode) and `SortShuffleDistributedTest` (sort shuffle across two executor
 JVMs over real TCP, with consolidated map blocks fetched between executors).
 
-## What's next (remaining stretch goals)
+## Stretch goals (part 2) — event bus & web UI
 
-- Speculative execution (re-launch a straggler before it finishes).
-- A tiny web UI showing stages, tasks, and shuffle output sizes — a
-  read-only `com.sun.net.httpserver.HttpServer` view over a scheduler
-  event/listener bus.
+A read-only web UI, built the way Spark builds its own: not by reaching into
+the scheduler, but by event-sourcing.
+
+**The event bus** (`LiveListenerBus`). The scheduler posts `SchedulerEvent`s
+(job start/end, stage submitted/completed, task start/end, executor
+added/removed) to a bus. Posting is non-blocking — events go on a queue drained
+by a single daemon thread that notifies `SchedulerListener`s in order. Async,
+single-consumer is deliberate: the scheduler posts from hot paths (RPC threads,
+the DAG thread) and must never block on a slow listener, and single-threaded
+dispatch means a listener needs no internal locking. This is exactly Spark's
+`LiveListenerBus` design.
+
+**Where events are posted.** `DAGScheduler` fires job and stage events around
+`runJob` and the stage submitters; `CoarseGrainedSchedulerBackend` fires
+executor add/remove and task start/end. Both took a nullable bus, so the engine
+runs fine without one — the UI is purely additive.
+
+**The status store** (`AppStatusStore`). A `SchedulerListener` that folds the
+event stream into current state: jobs, stages (with completed/failed task
+counts), executors (active? tasks run?). It hands out immutable `*View`
+snapshots so the UI thread never races the dispatch thread. This mirrors
+Spark's `AppStatusListener` + `AppStatusStore` split — the UI reads only the
+store, never the live scheduler, so it can neither perturb nor be perturbed by
+scheduling.
+
+**The UI** (`MiniSparkUI`). The JDK's built-in
+`com.sun.net.httpserver.HttpServer` — no servlet container, no dependency —
+serves one self-refreshing HTML page (Executors / Jobs / Stages, with a little
+progress bar per stage). Enabled by `minispark.ui.enabled=true`
+(`minispark.ui.port`, default 4040; 0 = ephemeral). Off by default so tests
+don't bind ports.
+
+Proven by `MiniSparkUITest`: runs a two-stage reduceByKey with the UI on,
+asserts the store shows one job + a ShuffleMapStage + a ResultStage all
+SUCCEEDED, then fetches the page over real HTTP and checks the rendered table.
+`WordCountWithUI` is a runnable demo (`mvn exec:java ... -Dexec.args="book.txt 60"`)
+that prints the URL and keeps the driver alive for browsing.
+
+## What's next (remaining stretch goal)
+
+- Speculative execution: re-launch a straggler task on another executor before
+  the slow copy finishes, taking whichever result lands first. The retry and
+  duplicate-completion-ignoring machinery from Phase 6 is most of what's needed;
+  it'd add a per-task runtime monitor in the TaskScheduler.
