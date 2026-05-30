@@ -590,8 +590,34 @@ Tested by `SqlParserTest`: `WHERE` filtering, arithmetic + aliases, AND/OR
 syntax error). The `SqlExample` runs the same query both ways and shows
 identical results.
 
+## Tier B (part 4) — ORDER BY, LIMIT, SELECT *
+
+Three more pieces of the SQL surface, in both the DSL and the parser.
+
+**ORDER BY** is a global (total) sort. `Sort` logical node → `SortExec`, which
+keys each row with a serializable `Comparable` `SortKey` (the evaluated order
+values + per-term asc/desc, nulls-first) and runs the engine's
+range-partitioned `sortByKey` — range partitioning places key ranges in
+partition order so a simple per-partition sort yields a total order. Multi-
+column and mixed ASC/DESC supported. DSL `df.orderBy(col("age"))`; SQL
+`ORDER BY age ASC, name DESC`.
+
+**LIMIT** → `Limit` node → `LimitExec`, which uses the engine's `take(n)`
+(short-circuits per partition) and re-parallelizes the head — Spark's
+`CollectLimit` shape. `ORDER BY ... LIMIT n` therefore gives top-N.
+
+**SELECT *** → an unresolved `Star` expression in the project list; the
+analyzer expands it into one `BoundReference` per input column (so
+`SELECT a, *, b` works too). Mirrors Spark's `UnresolvedStar`.
+
+The parser grammar grew `[ORDER BY expr [ASC|DESC], ...] [LIMIT n]` after the
+SELECT/WHERE/GROUP BY core, wrapping the project-or-aggregate result. Tested by
+`SortLimitStarTest` (ascending total order, DESC, multi-column mixed direction,
+LIMIT cap, ORDER BY+LIMIT top-N, and `SELECT *` value + schema), via both DSL
+and SQL text.
+
 ### Tier B — still to come
-- `SELECT *` star expansion, `ORDER BY` / `LIMIT`, explicit `JOIN ... ON` syntax
+- `DISTINCT`, `HAVING`, explicit `JOIN ... ON` syntax in the parser
 - Column pruning, broadcast-join selection by size, sort-merge join
 
 ## Tier C+ — further separate projects

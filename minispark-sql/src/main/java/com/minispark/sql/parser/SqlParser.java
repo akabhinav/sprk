@@ -73,8 +73,39 @@ public final class SqlParser {
             while (match(TokenType.COMMA)) groupBy.add(expression());
         }
 
+        // SELECT/WHERE/GROUP BY first build the project-or-aggregate, then ORDER
+        // BY and LIMIT wrap that (they apply to the already-projected rows).
+        List<com.minispark.sql.plan.SortOrder> orderBy = new ArrayList<>();
+        if (peekKeyword("ORDER")) {
+            advance(); expectKeyword("BY");
+            orderBy.add(sortItem());
+            while (match(TokenType.COMMA)) orderBy.add(sortItem());
+        }
+
+        int limit = -1;
+        if (peekKeyword("LIMIT")) {
+            advance();
+            Token n = peekToken();
+            if (!n.is(TokenType.INT_LITERAL)) throw new ParseException("LIMIT requires an integer");
+            advance();
+            limit = Integer.parseInt(n.text());
+        }
+
         expect(TokenType.EOF, "end of statement");
-        return buildProjectOrAggregate(items, groupBy, plan);
+
+        LogicalPlan result = buildProjectOrAggregate(items, groupBy, plan);
+        if (!orderBy.isEmpty()) result = new com.minispark.sql.plan.Sort(orderBy, result);
+        if (limit >= 0) result = new com.minispark.sql.plan.Limit(limit, result);
+        return result;
+    }
+
+    /** One ORDER BY term: expr followed by optional ASC/DESC. */
+    private com.minispark.sql.plan.SortOrder sortItem() {
+        Expression e = expression();
+        boolean asc = true;
+        if (peekKeyword("ASC")) advance();
+        else if (peekKeyword("DESC")) { advance(); asc = false; }
+        return new com.minispark.sql.plan.SortOrder(e, asc);
     }
 
     /** Decide between a plain projection and an aggregation based on the select list. */
@@ -84,11 +115,11 @@ public final class SqlParser {
         for (SelectItem it : items) if (it.expr instanceof AggMarker) hasAgg = true;
 
         if (!hasAgg && groupBy.isEmpty()) {
-            // SELECT * → projection over a sentinel star; the analyzer/exec expand it.
+            // SELECT a, *, b → a Star expression the analyzer expands to all input columns.
             List<Expression> proj = new ArrayList<>();
             for (SelectItem it : items) {
-                if (it.star) { return new Project(starProjection(child), child); }
-                proj.add(it.alias != null ? new Alias(it.expr, it.alias) : it.expr);
+                if (it.star) { proj.add(new com.minispark.sql.expr.Star()); }
+                else proj.add(it.alias != null ? new Alias(it.expr, it.alias) : it.expr);
             }
             return new Project(proj, child);
         }
@@ -105,17 +136,6 @@ public final class SqlParser {
             }
         }
         return new Aggregate(grouping, aggs, child);
-    }
-
-    /** Placeholder list for {@code SELECT *}; analyzer expands against child schema is N/A here,
-     *  so we instead defer by returning a single star — handled by leaving Project with all cols.
-     *  For the demo we require explicit columns when not aggregating; star maps to "all". */
-    private List<Expression> starProjection(LogicalPlan child) {
-        // We cannot know the columns until analysis; represent * as a marker the
-        // analyzer expands. To keep the demo simple we throw if the child schema
-        // isn't yet available — callers should list columns. (Star expansion is a
-        // listed future item.)
-        throw new ParseException("SELECT * is not supported yet; list columns explicitly");
     }
 
     private List<SelectItem> selectItems() {

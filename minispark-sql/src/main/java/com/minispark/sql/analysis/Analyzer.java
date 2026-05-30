@@ -48,12 +48,33 @@ public final class Analyzer {
         if (withResolvedChildren instanceof Project p) {
             StructType in = p.child().schema();
             List<Expression> bound = new ArrayList<>();
-            for (Expression e : p.projectList()) bound.add(bind(e, in));
+            for (Expression e : p.projectList()) {
+                // Expand SELECT * into one bound reference per input column.
+                if (e instanceof com.minispark.sql.expr.Star) {
+                    for (int i = 0; i < in.size(); i++) {
+                        bound.add(new BoundReference(i, in.type(i), in.name(i)));
+                    }
+                } else {
+                    bound.add(bind(e, in));
+                }
+            }
             return new Project(bound, p.child());
         }
         if (withResolvedChildren instanceof Filter f) {
             StructType in = f.child().schema();
             return new Filter(bind(f.condition(), in), f.child());
+        }
+        if (withResolvedChildren instanceof com.minispark.sql.plan.Sort s) {
+            StructType in = s.child().schema();
+            List<com.minispark.sql.plan.SortOrder> bound = new ArrayList<>();
+            for (var o : s.orders()) {
+                bound.add(new com.minispark.sql.plan.SortOrder(bind(o.expr(), in), o.ascending()));
+            }
+            return new com.minispark.sql.plan.Sort(bound, s.child());
+        }
+        // Limit has no expressions to bind; its analyzed child is already set above.
+        if (withResolvedChildren instanceof com.minispark.sql.plan.Limit) {
+            return withResolvedChildren;
         }
         if (withResolvedChildren instanceof com.minispark.sql.plan.Join j) {
             StructType l = j.left().schema(), r = j.right().schema();

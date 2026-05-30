@@ -70,6 +70,23 @@ public final class DataFrame {
 
     public DataFrame where(Column condition) { return filter(condition); }
 
+    /** Global sort, ascending, by the given columns. */
+    public DataFrame orderBy(Column... cols) {
+        List<com.minispark.sql.plan.SortOrder> orders = new ArrayList<>(cols.length);
+        for (Column c : cols) orders.add(new com.minispark.sql.plan.SortOrder(c.expr(), true));
+        return new DataFrame(session, new com.minispark.sql.plan.Sort(orders, logicalPlan));
+    }
+
+    /** Global sort with explicit order terms. */
+    public DataFrame orderBy(List<com.minispark.sql.plan.SortOrder> orders) {
+        return new DataFrame(session, new com.minispark.sql.plan.Sort(orders, logicalPlan));
+    }
+
+    /** Keep at most {@code n} rows. */
+    public DataFrame limit(int n) {
+        return new DataFrame(session, new com.minispark.sql.plan.Limit(n, logicalPlan));
+    }
+
     /** Group by the given columns; call {@code .agg(...)} on the result. */
     public GroupedData groupBy(Column... cols) {
         List<Expression> exprs = new ArrayList<>(cols.length);

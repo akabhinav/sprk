@@ -41,6 +41,12 @@ public final class SparkPlanner {
             return new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), j.joinType(), j.schema(),
                     plan(j.left()), plan(j.right()));
         }
+        if (logical instanceof com.minispark.sql.plan.Sort s) {
+            return new SortExec(s.orders(), plan(s.child()));
+        }
+        if (logical instanceof com.minispark.sql.plan.Limit l) {
+            return new LimitExec(l.limit(), plan(l.child()), sc);
+        }
         throw new UnsupportedOperationException("No physical strategy for " + logical);
     }
 }
