@@ -61,7 +61,20 @@ final class JobCancellationTest {
             assertThat(caught.get())
                     .as("cancelled job should surface an exception")
                     .isNotNull();
-            assertThat(caught.get().toString().toLowerCase()).contains("abort");
+            // The abort reason is carried as the cause of the wrapping
+            // "ResultStage N failed" RuntimeException; check the whole chain.
+            String chain = throwableChain(caught.get()).toLowerCase();
+            assertThat(chain).contains("abort");
+        }
+    }
+
+    private static String throwableChain(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            sb.append(cur).append(" | ");
+            if (cur.getCause() == cur) break;
+        }
+        return sb.toString();
         }
     }
 }
