@@ -149,6 +149,7 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 
 | Doc | Contents |
 |-----|----------|
+| [**Distributed flow deep-dive**](docs/INTERNALS-DISTRIBUTED-FLOW.md) | a full distributed run traced end-to-end, mapped line-by-line to Apache Spark — **start here to learn the internals / contribute to Spark** |
 | [Components overview](docs/components/README.md) | one page per subsystem, with diagrams |
 | [RPC layer](docs/components/01-rpc.md) | `RpcEnv`, Local vs Netty transport, wire protocol |
 | [Core engine](docs/components/02-core-engine.md) | RDD, DAGScheduler, TaskScheduler, executor |
