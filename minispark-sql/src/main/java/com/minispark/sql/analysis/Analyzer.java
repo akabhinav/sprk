@@ -43,6 +43,22 @@ public final class Analyzer {
             StructType in = f.child().schema();
             return new Filter(bind(f.condition(), in), f.child());
         }
+        if (withResolvedChildren instanceof com.minispark.sql.plan.Join j) {
+            StructType l = j.left().schema(), r = j.right().schema();
+            List<Expression> lk = new ArrayList<>();
+            for (Expression e : j.leftKeys()) lk.add(bind(e, l));
+            List<Expression> rk = new ArrayList<>();
+            for (Expression e : j.rightKeys()) rk.add(bind(e, r));
+            return new com.minispark.sql.plan.Join(j.left(), j.right(), lk, rk, j.joinType());
+        }
+        if (withResolvedChildren instanceof com.minispark.sql.plan.Aggregate agg) {
+            StructType in = agg.child().schema();
+            List<Expression> boundGroups = new ArrayList<>();
+            for (Expression g : agg.groupingExprs()) boundGroups.add(bind(g, in));
+            List<com.minispark.sql.expr.agg.AggregateFunction> boundAggs = new ArrayList<>();
+            for (var a : agg.aggregates()) boundAggs.add(a.bind(in, this::bind));
+            return new com.minispark.sql.plan.Aggregate(boundGroups, boundAggs, agg.child());
+        }
         return withResolvedChildren;
     }
 

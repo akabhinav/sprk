@@ -527,11 +527,38 @@ Tested by `DataFrameTest` (filter+select+arithmetic+aliases+compound predicates
 end-to-end, plus schema correctness and fail-fast on bad columns) and
 `OptimizerTest` (each rule provably rewrites the plan).
 
+## Tier B (part 2) — aggregation & joins through the shuffle
+
+Both lower to the keyed-shuffle operators already in `minispark-core`, so SQL
+inherits map-side combine, fault tolerance, and locality for free.
+
+**Aggregation.** `AggregateFunction` is the init/update/merge/evaluate shape —
+exactly what enables map-side combine. The built-ins (`Count`, `Sum`, `Avg`,
+`Min`, `Max`) live in `Aggregates`; `Avg` carries a `(sum,count)` buffer so
+partial averages merge correctly across partitions. The `Aggregate` logical
+node outputs grouping cols ++ one field per aggregate; the analyzer
+special-cases it to rebind both the grouping expressions and each aggregate's
+child (via a `bind(schema, binder)` hook). `HashAggregateExec` lowers it to
+`reduceByKey`: map rows → `(GroupKey, buffers)`, `reduceByKey` merges buffers
+(map-side combine + shuffle + reduce-side combine), final map evaluates each
+buffer. The DSL is `df.groupBy(cols).agg(functions.sum(col("x")), ...)`.
+
+**Joins.** A `Join` logical node (INNER/LEFT/RIGHT/FULL) over two children with
+`leftKeys == rightKeys`; its schema is left cols ++ right cols, with the padded
+side made nullable for outer joins. The analyzer binds each side's keys against
+that side's schema. `ShuffledHashJoinExec` lowers to the engine's `cogroup`:
+both sides keyed and shuffled, then per key the cartesian product of left×right
+rows, with null-padding when one side is empty (which is how all four join
+types fall out of one strategy). The DSL is `left.join(right, "id")` or the
+explicit `join(right, leftKeys, rightKeys, JoinType.LEFT)`.
+
+Tested by `AggregateTest` (sum/count/avg/min/max, single and multi-column
+grouping, schema names) and `JoinTest` (inner keeps matches; left/right outer
+null-pad the unmatched side) — all running real shuffles end-to-end.
+
 ### Tier B — still to come
-- Aggregation (`groupBy`/`agg`) lowering to a shuffle + reduce
-- Joins (broadcast + sort-merge) over the existing shuffle
 - A SQL string parser (so `spark.sql("SELECT ...")` works, not just the DSL)
-- Column pruning, more pushdown, simple cost-based join selection
+- Column pruning, broadcast-join selection by size, sort-merge join
 
 ## Tier C+ — further separate projects
 

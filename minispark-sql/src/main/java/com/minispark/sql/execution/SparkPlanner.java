@@ -34,6 +34,13 @@ public final class SparkPlanner {
         if (logical instanceof Filter f) {
             return new FilterExec(f.condition(), plan(f.child()));
         }
+        if (logical instanceof com.minispark.sql.plan.Aggregate a) {
+            return new HashAggregateExec(a.groupingExprs(), a.aggregates(), a.schema(), plan(a.child()));
+        }
+        if (logical instanceof com.minispark.sql.plan.Join j) {
+            return new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), j.joinType(), j.schema(),
+                    plan(j.left()), plan(j.right()));
+        }
         throw new UnsupportedOperationException("No physical strategy for " + logical);
     }
 }

@@ -57,6 +57,34 @@ public final class DataFrame {
 
     public DataFrame where(Column condition) { return filter(condition); }
 
+    /** Group by the given columns; call {@code .agg(...)} on the result. */
+    public GroupedData groupBy(Column... cols) {
+        List<Expression> exprs = new ArrayList<>(cols.length);
+        for (Column c : cols) exprs.add(c.expr());
+        return new GroupedData(session, logicalPlan, exprs);
+    }
+
+    public GroupedData groupBy(String... colNames) {
+        Column[] cols = new Column[colNames.length];
+        for (int i = 0; i < colNames.length; i++) cols[i] = Column.col(colNames[i]);
+        return groupBy(cols);
+    }
+
+    /** Equi-join with {@code right} on {@code left.key == right.key} (INNER by default). */
+    public DataFrame join(DataFrame right, String keyColumn) {
+        return join(right, List.of(keyColumn), List.of(keyColumn), com.minispark.sql.plan.JoinType.INNER);
+    }
+
+    public DataFrame join(DataFrame right, List<String> leftKeys, List<String> rightKeys,
+                          com.minispark.sql.plan.JoinType joinType) {
+        List<Expression> lk = new ArrayList<>();
+        for (String k : leftKeys) lk.add(Column.col(k).expr());
+        List<Expression> rk = new ArrayList<>();
+        for (String k : rightKeys) rk.add(Column.col(k).expr());
+        return new DataFrame(session,
+                new com.minispark.sql.plan.Join(logicalPlan, right.logicalPlan, lk, rk, joinType));
+    }
+
     // ----- actions (eager) -----
 
     public List<Row> collect() {
