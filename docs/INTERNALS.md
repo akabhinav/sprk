@@ -477,9 +477,64 @@ needing any integration-test gymnastics to validate the core logic.
   ANY) with delay scheduling (we have NODE_LOCAL → ANY today)
 - Kryo serializer alternative (needs the Kryo dependency)
 
-## Tier B+ — separate multi-session projects
+## Tier B (part 1) — DataFrame / SQL: a miniature Catalyst
 
-- DataFrame / Dataset / Spark SQL (Catalyst tree, optimizer, code-gen lite)
+A new `minispark-sql` module sits on top of `minispark-core`, compiling a
+schema-typed DataFrame API down to RDD jobs through the same four stages as
+real Spark SQL: **analyze → optimize → plan → execute**.
+
+**Type system & rows.** `DataType` (INT/LONG/DOUBLE/STRING/BOOLEAN),
+`StructField`, `StructType` (a schema with name→ordinal lookup), and a
+positional, serializable `Row`. Rows cross the RDD/shuffle seam like any record.
+
+**Expression tree.** `Expression` nodes report their output `DataType` against
+an input schema, `eval` against a `Row`, and expose `children`/`withChildren`
+for generic rewriting. Leaves: `Literal`, `UnresolvedAttribute` (name) →
+`BoundReference` (ordinal, post-analysis). Operators: `Arithmetic`,
+`Comparison`, `BooleanOp` (short-circuit), `Alias`. SQL null semantics (null in
+→ null out) throughout.
+
+**Logical plan.** `LocalRelation` (in-memory rows leaf), `Project`, `Filter`;
+each computes its own output `StructType`. The DataFrame DSL (`Column`,
+`select`/`filter`) builds these lazily.
+
+**Analyzer.** Bottom-up, rewrites every `UnresolvedAttribute` into a
+`BoundReference` against its input schema, so `eval` is a direct array access
+with no per-row name lookup. Unresolvable columns fail fast with an
+`AnalysisException` — including the genuinely-invalid "filter on a column the
+projection already dropped", which real Spark rejects too.
+
+**Optimizer.** A fixed-point `RuleExecutor`-style loop over pluggable `Rule`s:
+- `ConstantFolding` — a fully-literal subtree (`2 + 3`) is evaluated once at
+  optimize time and replaced by a `Literal`, not recomputed per row.
+- `PushDownFilter` — `Filter(Project)` → `Project(Filter)` when the predicate's
+  columns survive in the projection's input (fewer rows through the projection).
+- `CombineFilters` — adjacent filters merge into one `AND`.
+
+**Planner & execution.** `SparkPlanner` matches each logical operator to a
+physical strategy (`LocalTableScanExec` → `sc.parallelize`, `ProjectExec` →
+RDD `map`, `FilterExec` → RDD `filter`). `execute()` builds the RDD lineage;
+a DataFrame action (`collect`/`count`) runs the job on the full engine
+(scheduler, shuffle, fault tolerance — all of Tiers 1–A underneath).
+
+**Entry point.** `MiniSparkSession` wraps a `MiniSparkContext` and owns the
+analyzer/optimizer/planner, mirroring `SparkSession` over `SparkContext`.
+`DataFrame.explain()` prints the analyzed/optimized/physical trees — the
+`SqlExample` shows constant folding (`age + (2+3)` → `age + 5`) and the lowering
+to `ProjectExec/FilterExec/LocalTableScan` for a real query.
+
+Tested by `DataFrameTest` (filter+select+arithmetic+aliases+compound predicates
+end-to-end, plus schema correctness and fail-fast on bad columns) and
+`OptimizerTest` (each rule provably rewrites the plan).
+
+### Tier B — still to come
+- Aggregation (`groupBy`/`agg`) lowering to a shuffle + reduce
+- Joins (broadcast + sort-merge) over the existing shuffle
+- A SQL string parser (so `spark.sql("SELECT ...")` works, not just the DSL)
+- Column pruning, more pushdown, simple cost-based join selection
+
+## Tier C+ — further separate projects
+
 - Structured Streaming (micro-batch over RDDs)
 - Parquet / ORC / JDBC connectors
 - Kubernetes / Standalone cluster managers

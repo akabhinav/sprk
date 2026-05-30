@@ -6,20 +6,25 @@
         <artifactId>minispark-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
-    <artifactId>minispark-examples</artifactId>
-    <name>MiniSpark Examples</name>
+    <artifactId>minispark-sql</artifactId>
+    <name>MiniSpark SQL</name>
+    <!--
+        Tier B: a DataFrame / SQL layer (a miniature Catalyst) that compiles a
+        logical plan through a rule-based optimizer down to the RDD engine in
+        minispark-core. Real Spark equivalent: the spark-catalyst + spark-sql modules.
+    -->
     <dependencies>
         <dependency>
             <groupId>com.minispark</groupId>
             <artifactId>minispark-core</artifactId>
             <version>0.1.0-SNAPSHOT</version>
         </dependency>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
         <dependency>
-            <groupId>com.minispark</groupId>
-            <artifactId>minispark-sql</artifactId>
-            <version>0.1.0-SNAPSHOT</version>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
         </dependency>
-        <dependency><groupId>ch.qos.logback</groupId><artifactId>logback-classic</artifactId></dependency>
         <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId></dependency>
         <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId></dependency>
     </dependencies>
