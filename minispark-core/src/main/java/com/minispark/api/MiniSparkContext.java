@@ -13,6 +13,7 @@ import com.minispark.scheduler.cluster.CoarseGrainedSchedulerBackend;
 import com.minispark.scheduler.cluster.ExecutorLauncher;
 import com.minispark.scheduler.cluster.LocalExecutorLauncher;
 import com.minispark.scheduler.cluster.ProcessExecutorLauncher;
+import com.minispark.scheduler.cluster.YarnExecutorLauncher;
 import com.minispark.serializer.JavaSerializer;
 import com.minispark.serializer.Serializer;
 import com.minispark.shuffle.HashShuffleManager;
@@ -48,6 +49,7 @@ public final class MiniSparkContext implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(MiniSparkContext.class);
     private static final Pattern LOCAL_MASTER = Pattern.compile("local(?:\\[(\\*|\\d+)])?");
+    private static final Pattern YARN_MASTER  = Pattern.compile("miniyarn://([^:]+):(\\d+)");
 
     private final MiniSparkConf conf;
     private final Serializer serializer;
@@ -64,7 +66,11 @@ public final class MiniSparkContext implements AutoCloseable {
         this.conf = conf;
         this.serializer = new JavaSerializer();
 
-        String rpcMode = conf.get("minispark.rpc.mode", "local");
+        Matcher yarnMatch = YARN_MASTER.matcher(conf.master());
+        boolean yarnMode = yarnMatch.matches();
+        // Master URL implies transport: miniyarn:// forces netty (executors live in
+        // other JVMs by definition); otherwise honour the explicit flag.
+        String rpcMode = yarnMode ? "netty" : conf.get("minispark.rpc.mode", "local");
         String driverHost = conf.get("minispark.driver.host", "127.0.0.1");
         int driverPort = conf.getInt("minispark.driver.port", 0);
         this.rpcEnv = RpcEnv.create("driver", driverHost, driverPort, rpcMode, serializer);
@@ -92,26 +98,37 @@ public final class MiniSparkContext implements AutoCloseable {
 
         ExecutorLauncher launcher;
         int totalCores;
-        if (rpcMode.equals("netty")) {
-            // Real separate-JVM executors.
+        int expectedExecutors;
+        if (yarnMode) {
+            // Executors come from a MiniYarn cluster: AM asks RM for containers,
+            // NMs spawn the executor JVMs which dial back to the driver.
+            int execMemoryMB = conf.getInt("minispark.executor.memoryMB", 512);
+            launcher = new YarnExecutorLauncher(rpcEnv,
+                    yarnMatch.group(1), Integer.parseInt(yarnMatch.group(2)),
+                    conf.appName(), executorInstances, executorCores, execMemoryMB);
+            totalCores = executorInstances * executorCores;
+            expectedExecutors = executorInstances;
+        } else if (rpcMode.equals("netty")) {
+            // Real separate-JVM executors, locally spawned (no cluster manager).
             launcher = new ProcessExecutorLauncher(executorInstances, executorCores);
             totalCores = executorInstances * executorCores;
+            expectedExecutors = executorInstances;
         } else {
             // Local mode: one in-process executor with `cores` slots (Spark's model).
             launcher = new LocalExecutorLauncher(rpcEnv, serializer, 1, cores);
             totalCores = cores;
+            expectedExecutors = 1;
         }
         this.defaultParallelism = totalCores;
         this.backend = new CoarseGrainedSchedulerBackend(
-                taskScheduler, rpcEnv, serializer, launcher,
-                rpcMode.equals("netty") ? executorInstances : 1, totalCores);
+                taskScheduler, rpcEnv, serializer, launcher, expectedExecutors, totalCores);
 
         this.taskScheduler.setBackend(backend);
         this.backend.start();
 
         this.dagScheduler = new DAGScheduler(taskScheduler, mapOutputTracker);
-        LOG.info("MiniSparkContext '{}' ready (master={}, rpc={}, parallelism={})",
-                conf.appName(), conf.master(), rpcMode, totalCores);
+        LOG.info("MiniSparkContext '{}' ready (master={}, rpc={}, parallelism={}, executors={})",
+                conf.appName(), conf.master(), rpcMode, totalCores, expectedExecutors);
     }
 
     private static int parseLocalCores(String master) {

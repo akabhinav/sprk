@@ -150,12 +150,83 @@ never an `RpcEndpointRef` — each side rebuilds the refs it needs from its own
 `RpcEnv`. Real Spark instead rebinds serialized refs on the receiving env; we
 took the simpler route and documented it.
 
+## Phase 5 — MiniYarn: a YARN-like cluster manager
+
+This phase introduces a real resource negotiation layer. The engine no longer
+spawns executor processes itself — it asks a cluster manager for containers,
+and a separate set of components (RM, NM, AM) decide where they run.
+
+**The cast.** Three new processes, each running on its own RpcEnv:
+- `ResourceManager` (master): tracks NodeManagers and their free capacity;
+  accepts AM registration and resource requests; runs a FIFO scheduler with a
+  least-loaded-fit policy so executors spread across the cluster.
+- `NodeManager` (per node): registers its `Resource(cores, memMB)` with the
+  RM, heartbeats free capacity every ~1s, and launches container processes
+  on demand using `ProcessBuilder` (child JVMs with inherited stdout).
+- `ApplicationMaster` (per app, in driver JVM = yarn-client mode): registers
+  with the RM, submits `RequestContainers`, receives `ContainersAllocated`,
+  and sends `LaunchContainer` to the owning NM. Substitutes a
+  `{{CONTAINER_ID}}` token in the command line so each executor JVM gets a
+  unique id without the AM tracking placements itself.
+
+**The protocol** (`com.miniyarn.common.YarnMessages`) is one record per wire
+message and mirrors real YARN's API split:
+```
+RegisterNodeManager / NodeHeartbeat            (NM → RM)
+RegisterApplication / RequestContainers /
+ReleaseContainer / UnregisterApplication       (AM → RM)
+ContainersAllocated / ContainerCompleted       (RM/NM → AM)
+LaunchContainer / KillContainer                (AM → NM)
+```
+Allocation and launch are separate hops, like real YARN: the RM only reserves
+resources, then the AM tells the NM what to actually run. NMs report container
+exits via heartbeat-batched `ContainerStatus`, so the RM frees node capacity
+without needing every NM to ask permission to crash.
+
+**The integration with the engine is one class:** `YarnExecutorLauncher`. It
+is the third implementation of the `ExecutorLauncher` seam from Phase 4 —
+`LocalExecutorLauncher` (in-process), `ProcessExecutorLauncher` (forked JVMs
+on this host), `YarnExecutorLauncher` (containers on remote NMs). The
+`DAGScheduler`, `TaskScheduler`, and `CoarseGrainedSchedulerBackend` don't
+care which one is in use; the executor processes the NM spawns are the same
+`CoarseGrainedExecutorBackend.main` from Phase 4 and dial back to the driver
+over the same Netty RPC.
+
+**Wiring it up.** `MiniSparkContext` recognises a `miniyarn://host:port`
+master URL: it forces `rpc.mode=netty` (executors must be remote-capable) and
+selects the YARN launcher. Configuration:
+```java
+new MiniSparkConf()
+    .setMaster("miniyarn://127.0.0.1:8032")
+    .set("minispark.executor.instances", "N")
+    .set("minispark.executor.cores", "2")
+    .set("minispark.executor.memoryMB", "256");
+```
+
+**The end-to-end lifecycle** (matches Spark-on-YARN exactly):
+1. User constructs `MiniSparkContext` with a `miniyarn://` master.
+2. Driver starts its Netty RpcEnv and publishes `CoarseGrainedScheduler`.
+3. `YarnExecutorLauncher` constructs an in-process `ApplicationMaster`.
+4. AM `RegisterApplication` → RM assigns `app_N`.
+5. AM `RequestContainers(N, Resource(cores,mem), launchCtx)`.
+6. RM picks the least-loaded fitting node per allocation, pushes
+   `ContainersAllocated(List<Container>)` to AM.
+7. AM expands the `{{CONTAINER_ID}}` token per container and sends
+   `LaunchContainer` to each owning NM.
+8. NM forks the executor JVM; `Process.onExit()` enqueues a status update.
+9. Executor JVM `CoarseGrainedExecutorBackend.main` connects to the driver,
+   sends `RegisterExecutor`. From here the path is identical to Phase 4 —
+   tasks dispatched, shuffle blocks fetched between executor block managers
+   over their `BlockManager` endpoints.
+
+Proven by `MiniYarnDistributedTest`: RM + 2 NMs (each with capacity for one
+container) + driver in one JVM but each on its own Netty port → AM requests
+2 executors → RM places one container on **each** NM → NMs spawn 2 executor
+JVMs that connect back → WordCount runs with the shuffle crossing the
+network → assertion verifies both `nm1` and `nm2` hosted a container.
+
 ## What's next
 
-- **Phase 5**: MiniYarn — ResourceManager, NodeManagers, ApplicationMaster,
-  Containers. A `YarnSchedulerBackend` reuses the `CoarseGrainedExecutorBackend`
-  and the same `SchedulerBackend` seam; only the `ExecutorLauncher` changes
-  from "spawn a local process" to "ask a NodeManager to launch a container".
 - **Phase 6**: lineage-based recomputation on executor loss, task retry,
   `rdd.cache()` via `BlockManager`, broadcast variables, sort shuffle,
-  speculative execution, a tiny web UI.
+  speculative execution, a tiny web UI showing stages/tasks.

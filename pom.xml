@@ -16,8 +16,8 @@
 
     <modules>
         <module>minispark-rpc</module>
-        <module>minispark-core</module>
         <module>miniyarn</module>
+        <module>minispark-core</module>
         <module>minispark-examples</module>
     </modules>
 
