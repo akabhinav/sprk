@@ -202,6 +202,47 @@ mvn -pl minispark-sql      test -Dtest=SqlDistributedTest            # spark.sql
 They **abort (skip) gracefully** if the sandbox can't spawn child JVMs, rather
 than failing.
 
+### Distributed example gallery (20 worked examples)
+
+`minispark-examples/.../dist/` holds 20 end-to-end examples, all run across a
+driver + 2 executor JVMs over TCP (shared harness: `DistTestSupport` — spins up
+the cluster on a watchdog thread and aborts cleanly if JVMs can't spawn).
+
+```bash
+# all 20 at once
+mvn -pl minispark-examples test -Dtest='RddDistributedExamplesTest,FeatureDistributedExamplesTest,SqlDistributedExamplesTest'
+```
+
+| # | Example | Exercises |
+|---|---------|-----------|
+| 1 | sum of squares of evens | map + filter + reduce |
+| 2 | tokenize & count | flatMap + count |
+| 3 | word count | reduceByKey (map-side combine + shuffle) |
+| 4 | group values by key | groupByKey |
+| 5 | inner join | join across the shuffle |
+| 6 | sort by key | range-partitioned total order |
+| 7 | distinct count | reduceByKey dedup |
+| 8 | reuse a cached RDD | `cache()` |
+| 9 | persist with spill | `MEMORY_AND_DISK` + tiny memory budget |
+| 10 | broadcast lookup table | `sc.broadcast` |
+| 11 | accumulator | counter summed across executors |
+| 12 | sort shuffle reduceByKey | `shuffle.manager=sort` |
+| 13 | average per key | (sum,count) reduceByKey |
+| 14 | DataFrame filter + select | DSL, distributed |
+| 15 | SQL GROUP BY | `spark.sql` aggregate shuffle |
+| 16 | SQL HAVING + ORDER BY | post-aggregate filter + sort |
+| 17 | SQL JOIN ... ON | two temp views joined |
+| 18 | SQL aggregate in expression | `sum(age)+1` |
+| 19 | SQL ORDER BY ... LIMIT | distributed top-N |
+| 20 | CSV read → query → write → read | full batch I/O round-trip |
+
+Run one group:
+```bash
+mvn -pl minispark-examples test -Dtest=RddDistributedExamplesTest       # 1–7
+mvn -pl minispark-examples test -Dtest=FeatureDistributedExamplesTest   # 8–13
+mvn -pl minispark-examples test -Dtest=SqlDistributedExamplesTest        # 14–20
+```
+
 ---
 
 ## 6. Troubleshooting
