@@ -21,9 +21,11 @@ public final class WordCount {
     public static void main(String[] args) {
         String path = args.length > 0 ? args[0] : "README.txt";
 
-        MiniSparkConf conf = new MiniSparkConf()
-                .setAppName("WordCount")
-                .setMaster("local[4]");
+        // A bare conf: master/executor settings come from minispark.* config
+        // (which MiniSparkConf reads from system properties). Under
+        // minispark-submit those are set from --master / --num-executors etc.;
+        // run directly with no config and it defaults to local[*].
+        MiniSparkConf conf = new MiniSparkConf().setAppName("WordCount");
 
         try (MiniSparkContext sc = new MiniSparkContext(conf)) {
             List<Tuple2<String, Integer>> counts = sc.textFile(path)

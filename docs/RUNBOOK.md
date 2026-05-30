@@ -78,6 +78,59 @@ You'll see `Spawned executor JVM proc-0 …` and `Registered executor …` in th
 logs. Convenience script: `scripts/submit.sh /path/to/book.txt` (env vars
 `EXECUTORS`, `CORES`).
 
+### 3.2a `minispark-submit` — the spark-submit equivalent
+
+For a `spark-submit`-style workflow (submit *any* app class with flags, no
+hard-coded master), use `minispark-submit`. It parses the options, sets the
+`minispark.*` config, and invokes your app's `main()` — so an app written
+against a bare `MiniSparkConf` (like `WordCount`) picks up the submitted master
+and executor settings.
+
+```bash
+scripts/minispark-submit.sh \
+  --class com.minispark.examples.WordCount \
+  --master netty \
+  --num-executors 2 \
+  --executor-cores 2 \
+  /path/to/book.txt
+```
+
+```mermaid
+flowchart LR
+    CLI["minispark-submit\n--class --master\n--num-executors …"] --> L["MiniSparkSubmit\n(sets minispark.* sysprops)"]
+    L --> APP["app.main(args)\nnew MiniSparkConf()"]
+    APP --> D["driver"]
+    D -->|spawns| E1["executor JVM proc-0"]
+    D -->|spawns| E2["executor JVM proc-1"]
+```
+
+Option → config mapping:
+
+| Flag | Config key |
+|------|-----------|
+| `--class <FQCN>` | (the app main to run; required) |
+| `--master <url>` | `minispark.master` (`local[N]` / `netty` / `miniyarn://…`) |
+| `--name <str>` | `minispark.app.name` |
+| `--num-executors <n>` | `minispark.executor.instances` |
+| `--executor-cores <n>` | `minispark.executor.cores` |
+| `--executor-memory <mb>` | `minispark.executor.memoryMB` |
+| `--conf k=v` (repeatable) | any `minispark.*` key (e.g. `--conf minispark.shuffle.manager=sort`) |
+
+A non-`local` master implies `minispark.rpc.mode=netty` automatically (real
+executor JVMs), just as spark-submit implies remote execution for a cluster
+manager. `SKIP_BUILD=1` skips the Maven build if `target/classes` is current.
+Windows: `scripts\minispark-submit.cmd` with the same flags.
+
+Example — submit through MiniYarn with sort shuffle:
+```bash
+scripts/minispark-submit.sh \
+  --class com.minispark.examples.WordCount \
+  --master miniyarn://127.0.0.1:8032 \
+  --num-executors 2 --executor-cores 2 --executor-memory 256 \
+  --conf minispark.shuffle.manager=sort \
+  /path/to/book.txt
+```
+
 ### 3.3 Cluster mode (MiniYarn)
 
 Run the ResourceManager and NodeManagers as **separate processes**, then submit.
