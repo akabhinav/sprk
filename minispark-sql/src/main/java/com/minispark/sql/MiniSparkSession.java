@@ -79,5 +79,8 @@ public final class MiniSparkSession implements AutoCloseable {
         return new DataFrame(this, parsed);
     }
 
+    /** Start a read: {@code spark.read().option(...).csv(path)} / {@code .json(path)}. */
+    public DataFrameReader read() { return new DataFrameReader(this); }
+
     @Override public void close() { sc.close(); }
 }

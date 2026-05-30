@@ -46,23 +46,46 @@ public final class TextFileRDD extends RDD<String> {
     public TextFileRDD(MiniSparkContext sc, String path, int numPartitions) {
         super(sc);
         try {
-            long size = Files.size(Path.of(path));
-            this.partitions = splitByBytes(path, size, Math.max(1, numPartitions));
+            int n = Math.max(1, numPartitions);
+            // A directory reads all of its regular files (Spark's textFile does
+            // the same), which is also how we read a previously-written output
+            // dir of part-NNNNN files. A single file is just the one-element case.
+            List<Path> files = listDataFiles(Path.of(path));
+            List<Partition> parts = new ArrayList<>();
+            int idx = 0;
+            for (Path f : files) {
+                long size = Files.size(f);
+                idx = splitByBytes(f.toString(), size, n, parts, idx);
+            }
+            this.partitions = parts;
         } catch (IOException e) {
             throw new RuntimeException("Cannot stat " + path, e);
         }
     }
 
-    private static List<Partition> splitByBytes(String path, long size, int n) {
-        List<Partition> out = new ArrayList<>(n);
+    private static List<Path> listDataFiles(Path p) throws IOException {
+        if (!Files.isDirectory(p)) return List.of(p);
+        try (var stream = Files.list(p)) {
+            return stream.filter(Files::isRegularFile)
+                    .filter(f -> { String n = f.getFileName().toString();
+                                   return !n.startsWith(".") && !n.startsWith("_"); }) // skip _SUCCESS, hidden
+                    .sorted()
+                    .toList();
+        }
+    }
+
+    /** Byte-split one file into up to {@code n} partitions, appended to {@code out}. */
+    private static int splitByBytes(String path, long size, int n, List<Partition> out, int startIdx) {
         long stride = Math.max(1L, size / n);
         long cursor = 0;
-        for (int i = 0; i < n; i++) {
-            long end = (i == n - 1) ? size : Math.min(size, cursor + stride);
-            out.add(new LinePartition(i, path, cursor, end));
+        int idx = startIdx;
+        // Always emit at least one partition per file (even an empty file).
+        do {
+            long end = (cursor + stride >= size) ? size : cursor + stride;
+            out.add(new LinePartition(idx++, path, cursor, end));
             cursor = end;
-        }
-        return out;
+        } while (cursor < size);
+        return idx;
     }
 
     @Override public List<Partition> getPartitions() { return partitions; }

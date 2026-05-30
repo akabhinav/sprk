@@ -39,6 +39,9 @@ public final class DataFrame {
         session.createOrReplaceTempView(name, this);
     }
 
+    /** Start a write: {@code df.write().option(...).csv(path)} / {@code .json(path)}. */
+    public DataFrameWriter write() { return new DataFrameWriter(this); }
+
     /**
      * The schema this DataFrame produces. Analyzes first so it works on plans
      * built from SQL text (which contain unresolved table/column references

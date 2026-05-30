@@ -641,6 +641,44 @@ id = pid GROUP BY name` parses, plans, and runs through two shuffles.
 Tested by `DistinctHavingJoinTest`: distinct (multi- and single-column),
 HAVING after GROUP BY, inner/left JOIN ON, and a join feeding a group-by.
 
+## Tier B (part 6) — batch file I/O: read & write CSV / JSON
+
+Completes the real-job story: read a file → query it → write results → read
+them back. Built on the engine's `textFile`/`saveAsTextFile`, so reads and
+writes are themselves distributed jobs; only schema inference samples a few
+rows on the driver.
+
+**The plan-tree bridge.** `LogicalRDD` is a leaf carrying a lazy
+`Supplier<RDD<Row>>` (and a known schema); `RDDScanExec` hands back that RDD at
+execution. This is how an external source plugs into the SQL plan tree without
+the source having to be a `LocalRelation` of materialized rows.
+
+**Reader** (`spark.read().option(...).csv|json(path)`):
+- CSV: quote-aware line splitting (`""` escapes, configurable delimiter),
+  `header` to name columns, `inferSchema` to widen types per column
+  (INT < LONG < DOUBLE, else STRING; PERMISSIVE — bad cells → null). An
+  explicit `.schema(...)` skips inference.
+- JSON: a minimal JSON-lines parser (flat objects, primitive values); schema
+  inferred by unioning keys across sampled lines.
+- Both accept a single file or a directory of part-files (so a written output
+  dir reads straight back).
+
+**Writer** (`df.write().option(...).csv|json(path)`): compiles+executes to
+`RDD<Row>`, formats each row, and `saveAsTextFile`s one `part-NNNNN` per
+partition. CSV `header` prepends the header to each part-file (via a
+`MapPartitionsRDD`), exactly as Spark does.
+
+**Engine change.** `TextFileRDD` became directory-aware: a directory reads all
+its non-hidden regular files (skipping `_SUCCESS`/dotfiles), byte-splitting each
+across partitions — matching Spark's `textFile` and enabling the round-trip.
+No existing core/examples test regressed.
+
+Tested by `FileIOTest`: CSV with header + inferred types, CSV without header
+(c0,c1 names), explicit schema, JSON-lines inference, and two full round-trips
+(read→GROUP BY→write→read for CSV; write→read for JSON). Two bugs the tests
+caught and fixed: reading a written *directory* (textFile was single-file only)
+and per-part-file repeated CSV headers leaking into inference.
+
 ### Tier B — still to come
 - Column pruning, broadcast-join selection by size, sort-merge join (optimizer
   depth, not new surface)

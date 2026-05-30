@@ -28,6 +28,9 @@ public final class SparkPlanner {
         if (logical instanceof LocalRelation r) {
             return new LocalTableScanExec(r.schema(), r.rows(), sc, numPartitions);
         }
+        if (logical instanceof com.minispark.sql.plan.LogicalRDD lr) {
+            return new RDDScanExec(lr);
+        }
         if (logical instanceof Project p) {
             return new ProjectExec(p.projectList(), p.schema(), plan(p.child()));
         }
