@@ -63,8 +63,9 @@ public abstract class RDD<T> implements Serializable {
     public final MiniSparkContext context() { return sc; }
     public final StorageLevel storageLevel() { return storageLevel; }
     public final boolean isCheckpointed() { return checkpointed; }
-    final void markCheckpointed() { this.checkpointed = true; }
-    final String checkpointPath() { return checkpointPath; }
+    // Public so MiniSparkContext (different package) can finalize checkpoints.
+    public final void markCheckpointed() { this.checkpointed = true; }
+    public final String checkpointPath() { return checkpointPath; }
 
     /**
      * Mark this RDD to be checkpointed: on the next action that materializes it,
