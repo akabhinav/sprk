@@ -111,7 +111,8 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
     private void reportFinished(TaskContext ctx, ClusterMessages.LaunchTask lt, Object result) {
         driverRef.send(new ClusterMessages.StatusUpdate(
                 executorId, lt.stageId(), lt.partitionId(), ctx.attemptNumber(),
-                TaskState.FINISHED, serializer.serialize(result), null));
+                TaskState.FINISHED, serializer.serialize(result), null,
+                ctx.accumulatorUpdates()));
     }
 
     private void reportFailed(TaskContext ctx, ClusterMessages.LaunchTask lt, Throwable err) {
@@ -124,7 +125,7 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
                 : new TaskFailureReason.GenericError(String.valueOf(err));
         driverRef.send(new ClusterMessages.StatusUpdate(
                 executorId, lt.stageId(), lt.partitionId(), ctx.attemptNumber(),
-                TaskState.FAILED, null, reason));
+                TaskState.FAILED, null, reason, ctx.accumulatorUpdates()));
     }
 
     private static FetchFailedException findFetchFailed(Throwable t) {

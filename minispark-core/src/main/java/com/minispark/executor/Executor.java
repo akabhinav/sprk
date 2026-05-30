@@ -55,6 +55,9 @@ public final class Executor {
         pool.submit(() -> {
             int attempt = ATTEMPT.incrementAndGet();
             TaskContext ctx = new TaskContext(stageId, partitionId, attempt);
+            // Make ctx discoverable by Accumulator.add and any code that wants
+            // task scope without an explicit parameter.
+            TaskContext.setCurrent(ctx);
             try {
                 Task<?> task = serializer.deserialize(serializedTask);
                 LOG.debug("Running {}", ctx);
@@ -63,6 +66,8 @@ public final class Executor {
             } catch (Throwable t) {
                 LOG.warn("Task {} failed: {}", ctx, t.toString());
                 onFailure.accept(ctx, t);
+            } finally {
+                TaskContext.unset();
             }
         });
     }

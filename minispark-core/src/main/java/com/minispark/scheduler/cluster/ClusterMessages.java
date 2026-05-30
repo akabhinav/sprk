@@ -36,12 +36,14 @@ public final class ClusterMessages {
     /**
      * Executor → Driver (send): task outcome.
      * {@code resultBytes} is the serialized return value on success;
-     * {@code failureReason} is the structured cause on failure (so the driver
-     * can dispatch on FetchFailed vs generic error vs executor-lost).
+     * {@code failureReason} is the structured cause on failure;
+     * {@code accumulatorUpdates} carries per-accumulator deltas the task
+     * produced (sent on success and on failure, just like real Spark).
      */
     public record StatusUpdate(String executorId, int stageId, int partitionId, int attempt,
                                TaskState state, byte[] resultBytes,
-                               TaskFailureReason failureReason)
+                               TaskFailureReason failureReason,
+                               java.util.Map<Long, Object> accumulatorUpdates)
             implements Serializable {}
 
     /**

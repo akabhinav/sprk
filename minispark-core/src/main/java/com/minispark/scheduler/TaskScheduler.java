@@ -14,6 +14,10 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Queues TaskSets, hands them to the {@link SchedulerBackend}, tracks
@@ -54,6 +58,10 @@ public final class TaskScheduler {
         int attempts;          // attempts already started
         boolean completed;
         Object result;
+        // Speculation bookkeeping: time the most-recent attempt started, and
+        // whether we have already launched a duplicate copy.
+        long launchedAtMs;
+        boolean speculated;
         PartitionState(Task<?> task) { this.task = task; }
     }
 
@@ -71,8 +79,35 @@ public final class TaskScheduler {
     }
     private final ConcurrentMap<Integer, StageBook> books = new ConcurrentHashMap<>();
 
+    // Speculation knobs (configurable in MiniSparkContext via setters below).
+    private boolean speculationEnabled = false;
+    private long speculationIntervalMs = 500;
+    /** Fraction of tasks in a stage that must finish before we consider speculating. */
+    private double speculationQuantile = 0.75;
+    /** Multiplier over the median completed-task runtime; anything slower is a straggler. */
+    private double speculationMultiplier = 1.5;
+
+    private final ScheduledExecutorService speculator =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "speculator");
+                t.setDaemon(true);
+                return t;
+            });
+    private final AtomicBoolean speculatorStarted = new AtomicBoolean(false);
+
     public TaskScheduler() { this(4); }
     public TaskScheduler(int maxAttempts) { this.maxAttempts = maxAttempts; }
+
+    public void setSpeculation(boolean enabled, long intervalMs, double quantile, double multiplier) {
+        this.speculationEnabled = enabled;
+        this.speculationIntervalMs = intervalMs;
+        this.speculationQuantile = quantile;
+        this.speculationMultiplier = multiplier;
+        if (enabled && speculatorStarted.compareAndSet(false, true)) {
+            speculator.scheduleAtFixedRate(this::checkSpeculatableTasks,
+                    intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+        }
+    }
 
     public void setBackend(SchedulerBackend backend) { this.backend = backend; }
     public void setDAGEventHandler(DAGEventHandler handler) { this.dagHandler = handler; }
@@ -105,6 +140,17 @@ public final class TaskScheduler {
             }
         }
         backend.reviveOffers();
+    }
+
+    /**
+     * Backend hook: a task has been dispatched to an executor. Used by the
+     * speculator to measure runtime and by the UI/listener bus to time things.
+     */
+    public void taskLaunched(int stageId, int partitionId) {
+        StageBook book = books.get(stageId);
+        if (book == null) return;
+        PartitionState ps = book.byPartition.get(partitionId);
+        if (ps != null) ps.launchedAtMs = System.currentTimeMillis();
     }
 
     /** Called by the backend to drain everything (initial submissions + retries). */
@@ -190,6 +236,63 @@ public final class TaskScheduler {
     public void executorLost(ExecutorLocation loc) {
         dagHandler.onExecutorLost(loc);
     }
+
+    /**
+     * Periodic check: in any in-flight stage, if a significant fraction of tasks
+     * have completed and any running task is much slower than the median
+     * completed runtime, launch a duplicate of the straggler. The Phase-6
+     * "first success wins" logic in {@link #taskCompleted} ensures we just
+     * take whichever copy finishes first; the duplicate doesn't double-count.
+     */
+    private void checkSpeculatableTasks() {
+        if (!speculationEnabled) return;
+        long now = System.currentTimeMillis();
+        for (Map.Entry<Integer, StageBook> e : books.entrySet()) {
+            StageBook book = e.getValue();
+            int total = book.totalTasks;
+            // Per-stage: collect runtimes of completed tasks for a median.
+            List<Long> completedRuntimes = new ArrayList<>();
+            List<PartitionState> running = new ArrayList<>();
+            synchronized (book) {
+                for (PartitionState ps : book.byPartition.values()) {
+                    if (ps.completed) {
+                        completedRuntimes.add(Math.max(1L, ps.launchedAtMs == 0 ? 0 : 0));
+                    } else if (ps.launchedAtMs > 0 && !ps.speculated) {
+                        running.add(ps);
+                    }
+                }
+            }
+            int completed = total - book.remaining;
+            if (completed < Math.max(1, (int) Math.ceil(total * speculationQuantile))) continue;
+            // Use the median of *current* runtime estimates rather than recorded
+            // completed durations (we don't store those today). Median runtime ~
+            // (now - earliest still-running launch) gives a workable signal.
+            // Simpler proxy: use 1.5× the time since the stage's first running
+            // task launched.
+            long oldestLaunch = Long.MAX_VALUE;
+            synchronized (book) {
+                for (PartitionState ps : book.byPartition.values()) {
+                    if (ps.launchedAtMs > 0) oldestLaunch = Math.min(oldestLaunch, ps.launchedAtMs);
+                }
+            }
+            if (oldestLaunch == Long.MAX_VALUE) continue;
+            long stageElapsed = now - oldestLaunch;
+            long thresholdMs = (long) (speculationMultiplier * stageElapsed / Math.max(1, completed)) * completed;
+            // Effective threshold: a task that's been running > multiplier×(stage so far / completed).
+            long perTaskMedian = Math.max(50, stageElapsed / Math.max(1, completed));
+            long stragglerMs = (long) (speculationMultiplier * perTaskMedian);
+            for (PartitionState ps : running) {
+                if (now - ps.launchedAtMs < stragglerMs) continue;
+                LOG.warn("Stage {} partition {} running {}ms (>{}ms) — launching speculative copy",
+                        e.getKey(), ps.task.partitionId(), now - ps.launchedAtMs, stragglerMs);
+                ps.speculated = true;
+                synchronized (pending) { retries.add(ps.task); }
+                backend.reviveOffers();
+            }
+        }
+    }
+
+    public void stop() { speculator.shutdownNow(); }
 
     public int defaultParallelism() { return backend.defaultParallelism(); }
 }

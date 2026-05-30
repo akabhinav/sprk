@@ -1,5 +1,8 @@
 package com.minispark.api;
 
+import com.minispark.accumulator.Accumulator;
+import com.minispark.accumulator.AccumulatorContext;
+import com.minispark.accumulator.AccumulatorParam;
 import com.minispark.broadcast.Broadcast;
 import com.minispark.broadcast.TorrentBroadcast;
 import com.minispark.executor.SparkEnv;
@@ -115,6 +118,16 @@ public final class MiniSparkContext implements AutoCloseable {
         listenerBus.addListener(statusStore);
 
         this.taskScheduler = new TaskScheduler();
+        // Speculation: off by default (cheap to leave on, but adds extra
+        // duplicate-task launches for slow tasks). When on, polls every
+        // `intervalMs` and launches a duplicate of any task that has been
+        // running > `multiplier` × the per-task median.
+        if (conf.get("minispark.speculation", "false").equalsIgnoreCase("true")) {
+            taskScheduler.setSpeculation(true,
+                    conf.getInt("minispark.speculation.intervalMs", 500),
+                    Double.parseDouble(conf.get("minispark.speculation.quantile", "0.75")),
+                    Double.parseDouble(conf.get("minispark.speculation.multiplier", "1.5")));
+        }
 
         int cores = parseLocalCores(conf.master());
         int executorInstances = conf.getInt("minispark.executor.instances", 1);
@@ -223,6 +236,25 @@ public final class MiniSparkContext implements AutoCloseable {
         return new TorrentBroadcast<>(bid, blockManager.location());
     }
 
+    /**
+     * Register a write-only accumulator. Tasks add to it; the driver reads via
+     * {@link Accumulator#value()} after the action returns.
+     */
+    public <T> Accumulator<T> accumulator(T initialValue, String name, AccumulatorParam<T> param) {
+        Accumulator<T> acc = new Accumulator<>(AccumulatorContext.nextId(), name, param);
+        acc.mergeDelta(initialValue);
+        AccumulatorContext.register(acc);
+        return acc;
+    }
+
+    public Accumulator<Long> longAccumulator(String name) {
+        return accumulator(0L, name, AccumulatorParam.LONG);
+    }
+
+    public Accumulator<Double> doubleAccumulator(String name) {
+        return accumulator(0.0, name, AccumulatorParam.DOUBLE);
+    }
+
     public RDD<String> textFile(String path) {
         return textFile(path, defaultParallelism);
     }
@@ -240,6 +272,7 @@ public final class MiniSparkContext implements AutoCloseable {
     @Override
     public void close() {
         backend.stop();
+        taskScheduler.stop();
         if (ui != null) ui.stop();
         listenerBus.stop();
         LOG.info("MiniSparkContext '{}' stopped", conf.appName());

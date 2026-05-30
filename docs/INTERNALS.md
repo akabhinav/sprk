@@ -390,9 +390,64 @@ SUCCEEDED, then fetches the page over real HTTP and checks the rendered table.
 `WordCountWithUI` is a runnable demo (`mvn exec:java ... -Dexec.args="book.txt 60"`)
 that prints the URL and keeps the driver alive for browsing.
 
-## What's next (remaining stretch goal)
+## Tier A engine completion (part 1) — accumulators, joins, more actions, RangePartitioner, speculation
 
-- Speculative execution: re-launch a straggler task on another executor before
-  the slow copy finishes, taking whichever result lands first. The retry and
-  duplicate-completion-ignoring machinery from Phase 6 is most of what's needed;
-  it'd add a per-task runtime monitor in the TaskScheduler.
+The plumbing built across phases 1–6 now supports a broader user-facing API and
+two long-promised features — straggler-tolerance via speculation and write-only
+metrics via accumulators. None of this required scheduler or RPC changes
+beyond a single new field (`accumulatorUpdates`) on `StatusUpdate`.
+
+**Accumulators.** `sc.longAccumulator("name")` returns an `Accumulator<Long>`
+whose `add()` is callable from any task lambda. Under the hood: each task
+context tracks deltas in a thread-local map; on completion the executor backend
+attaches them to its `StatusUpdate`; the driver merges via `AccumulatorParam`
+into the master value in `AccumulatorContext` (a static registry matching
+real Spark's `AccumulatorContext`). The handle deserializes on executors with
+its `driverValue` left null, so a task that accidentally calls `.value()` blows
+up rather than silently lying.
+
+**More pair-RDD ops.** `CoGroupedRDD` is the new shared primitive: takes N
+parent pair RDDs sharing one partitioner, registers one `ShuffleDependency`
+per parent, and `compute()` reads each shuffle's reducer-side iterator and
+folds keys together. `groupByKey` is implemented over a single shuffle (no
+combine; every record crosses the wire). `cogroup` and `join` are tiny adapters
+on top of `CoGroupedRDD`. `join` is inner; outer variants would extend the
+same shape. `sortByKey` uses a real {@link RangePartitioner} sampled from the
+input (reservoir sampling per partition, sorted on the driver, N−1
+equally-spaced boundaries) so each output partition's keys all sort before the
+next partition's; the post-shuffle MapPartitions sorts within each partition.
+
+**More actions.** `take(n)` / `first()` / `takeOrdered(n, cmp)` /
+`saveAsTextFile(path)`. `takeOrdered` keeps a per-partition bounded heap of
+size n, then merges on the driver. `saveAsTextFile` writes one
+`part-NNNNN` UTF-8 file per partition into the given directory.
+
+**Speculative execution.** Opt-in via `minispark.speculation=true`. A
+single-thread `speculator` polls in-flight stages every
+`speculation.intervalMs` (default 500). If `speculation.quantile` of a stage's
+tasks (default 75%) have completed, any task still running longer than
+`speculation.multiplier` × (per-task median runtime) is marked a straggler and
+a duplicate is enqueued onto the retries queue — handed to any free executor.
+The Phase-6 "first success wins" path in `TaskScheduler.taskCompleted` ensures
+we just take whichever copy reports first. Tested with a deliberate 3-second
+stall on one partition: the speculative copy overtakes it, the job finishes in
+~120ms, and the slow lambda is confirmed to have run twice.
+
+## Tier A — still to come
+
+- Disk-spilling cache (`MEMORY_AND_DISK`)
+- Locality-aware scheduling (PROCESS_LOCAL → NODE_LOCAL → ANY ladder with delay)
+- Checkpointing (snapshot RDD to durable storage to truncate lineage)
+- Dynamic allocation (request more/fewer executors based on backlog)
+- Job cancellation and job groups
+- Fair scheduler with pools
+- Kryo serializer alternative
+
+## Tier B+ — separate multi-session projects
+
+- DataFrame / Dataset / Spark SQL (Catalyst tree, optimizer, code-gen lite)
+- Structured Streaming (micro-batch over RDDs)
+- Parquet / ORC / JDBC connectors
+- Kubernetes / Standalone cluster managers
+- Production security stack (Kerberos, SASL, TLS)
+- Full Spark UI parity

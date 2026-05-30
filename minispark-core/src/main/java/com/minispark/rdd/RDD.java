@@ -178,6 +178,89 @@ public abstract class RDD<T> implements Serializable {
         sc.runJob(this, (ctx, it) -> { it.forEachRemaining(f::accept); return null; });
     }
 
+    /**
+     * First {@code n} elements, in partition-order. Real Spark runs partitions
+     * one (or a few) at a time and stops as soon as it has enough; we run all
+     * partitions in parallel and truncate — simpler, but reads more than it
+     * needs to on huge inputs. Adequate for a learning engine.
+     */
+    public List<T> take(int n) {
+        if (n <= 0) return new ArrayList<>();
+        List<List<T>> perPartition = sc.runJob(this, (ctx, it) -> {
+            List<T> out = new ArrayList<>();
+            while (it.hasNext() && out.size() < n) out.add(it.next());
+            return out;
+        });
+        List<T> result = new ArrayList<>(n);
+        for (List<T> part : perPartition) {
+            for (T x : part) {
+                if (result.size() == n) return result;
+                result.add(x);
+            }
+        }
+        return result;
+    }
+
+    public T first() {
+        List<T> head = take(1);
+        if (head.isEmpty()) throw new NoSuchElementException("first on empty RDD");
+        return head.get(0);
+    }
+
+    /**
+     * Smallest {@code n} elements per the comparator, globally. Each partition
+     * keeps its top n; the driver merges and trims.
+     */
+    public List<T> takeOrdered(int n, SerializableComparator<? super T> cmp) {
+        if (n <= 0) return new ArrayList<>();
+        List<List<T>> perPart = sc.runJob(this, (ctx, it) -> {
+            // Bounded-size max-heap of size n: cheapest way to keep the bottom n.
+            java.util.PriorityQueue<T> pq = new java.util.PriorityQueue<>(n, cmp.reversed());
+            while (it.hasNext()) {
+                T v = it.next();
+                if (pq.size() < n) pq.offer(v);
+                else if (cmp.compare(v, pq.peek()) < 0) { pq.poll(); pq.offer(v); }
+            }
+            List<T> out = new ArrayList<>(pq);
+            out.sort(cmp);
+            return out;
+        });
+        List<T> all = new ArrayList<>();
+        for (List<T> p : perPart) all.addAll(p);
+        all.sort(cmp);
+        return all.size() > n ? all.subList(0, n) : all;
+    }
+
+    /**
+     * Write each partition to {@code path/part-NNNNN}. Real Spark writes via
+     * Hadoop's OutputFormat; we use plain UTF-8 files (one per partition) so
+     * the result is browsable without any extra runtime.
+     */
+    public void saveAsTextFile(String path) {
+        java.nio.file.Path dir = java.nio.file.Path.of(path);
+        try {
+            java.nio.file.Files.createDirectories(dir);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Cannot create output dir " + path, e);
+        }
+        // Capture path as a Serializable string; the lambda runs on executors.
+        final String outPath = path;
+        sc.runJob(this, (ctx, it) -> {
+            java.nio.file.Path file = java.nio.file.Path.of(outPath,
+                    String.format("part-%05d", ctx.partitionId()));
+            try (java.io.BufferedWriter w = java.nio.file.Files.newBufferedWriter(
+                    file, java.nio.charset.StandardCharsets.UTF_8)) {
+                while (it.hasNext()) {
+                    w.write(String.valueOf(it.next()));
+                    w.write('\n');
+                }
+            } catch (java.io.IOException e) {
+                throw new RuntimeException("Failed writing " + file, e);
+            }
+            return null;
+        });
+    }
+
     // ----- serializable functional interfaces -----
     // Closures cross the SchedulerBackend seam, so they must be Serializable from day one.
 
@@ -185,6 +268,7 @@ public abstract class RDD<T> implements Serializable {
     @FunctionalInterface public interface SerializableBiFunction<A, B, C> extends BiFunction<A, B, C>, Serializable {}
     @FunctionalInterface public interface SerializablePredicate<A> extends Predicate<A>, Serializable {}
     @FunctionalInterface public interface SerializableConsumer<A> extends java.util.function.Consumer<A>, Serializable {}
+    @FunctionalInterface public interface SerializableComparator<A> extends java.util.Comparator<A>, Serializable {}
 
     // ----- tiny iterator adapters -----
 

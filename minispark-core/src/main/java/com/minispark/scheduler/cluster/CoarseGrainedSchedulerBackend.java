@@ -220,6 +220,7 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
                         task.stageId(), task.partitionId(), target.id);
                 post(new SchedulerEvent.TaskStart(task.stageId(), task.partitionId(),
                         target.id, System.currentTimeMillis()));
+                scheduler.taskLaunched(task.stageId(), task.partitionId());
                 target.ref.send(new ClusterMessages.LaunchTask(task.stageId(), task.partitionId(), bytes));
             }
         }
@@ -285,6 +286,10 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
             }
             post(new SchedulerEvent.TaskEnd(su.stageId(), su.partitionId(),
                     su.state() == TaskState.FINISHED, System.currentTimeMillis()));
+            // Merge accumulator deltas before declaring task completion, so a
+            // caller reading an accumulator after the action returns sees the
+            // last task's contribution. Real Spark behaves the same way.
+            com.minispark.accumulator.AccumulatorContext.mergeAll(su.accumulatorUpdates());
             if (su.state() == TaskState.FINISHED) {
                 Object result = su.resultBytes() == null ? null : serializer.deserialize(su.resultBytes());
                 scheduler.taskCompleted(su.stageId(), su.partitionId(), result);
