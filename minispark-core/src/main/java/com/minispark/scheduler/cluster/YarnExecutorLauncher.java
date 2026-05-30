@@ -38,11 +38,13 @@ public final class YarnExecutorLauncher implements ExecutorLauncher {
     private final int numExecutors;
     private final int coresPerExecutor;
     private final int memoryMBPerExecutor;
+    private final java.util.Map<String, String> systemProps;
 
     private ApplicationMaster am;
 
     public YarnExecutorLauncher(RpcEnv rpcEnv, String rmHost, int rmPort, String appName,
-                                int numExecutors, int coresPerExecutor, int memoryMBPerExecutor) {
+                                int numExecutors, int coresPerExecutor, int memoryMBPerExecutor,
+                                java.util.Map<String, String> systemProps) {
         this.rpcEnv = rpcEnv;
         this.rmHost = rmHost;
         this.rmPort = rmPort;
@@ -50,6 +52,7 @@ public final class YarnExecutorLauncher implements ExecutorLauncher {
         this.numExecutors = numExecutors;
         this.coresPerExecutor = coresPerExecutor;
         this.memoryMBPerExecutor = memoryMBPerExecutor;
+        this.systemProps = systemProps;
     }
 
     @Override
@@ -65,14 +68,17 @@ public final class YarnExecutorLauncher implements ExecutorLauncher {
         // on the container id implicitly (the driver only cares it's unique).
         String javaBin = System.getProperty("java.home") + File.separator + "bin" + File.separator + "java";
         String classpath = System.getProperty("java.class.path");
-        List<String> command = new ArrayList<>(List.of(
-                javaBin, "-cp", classpath,
-                CoarseGrainedExecutorBackend.class.getName(),
-                driverAddress.host, String.valueOf(driverAddress.port),
-                // The AM expands this token to the allocated container's id so each
-                // executor JVM gets a unique id without us tracking them here.
-                ApplicationMaster.CONTAINER_ID_TOKEN,
-                String.valueOf(coresPerExecutor)));
+        List<String> command = new ArrayList<>();
+        command.add(javaBin);
+        command.add("-cp"); command.add(classpath);
+        // Forward configured system properties (e.g. shuffle manager) to the container JVM.
+        systemProps.forEach((k, v) -> command.add("-D" + k + "=" + v));
+        command.add(CoarseGrainedExecutorBackend.class.getName());
+        command.add(driverAddress.host); command.add(String.valueOf(driverAddress.port));
+        // The AM expands this token to the allocated container's id so each
+        // executor JVM gets a unique id without us tracking them here.
+        command.add(ApplicationMaster.CONTAINER_ID_TOKEN);
+        command.add(String.valueOf(coresPerExecutor));
         ContainerLaunchContext ctx = new ContainerLaunchContext(command, new HashMap<>());
 
         am.setNextLaunchCtx(ctx);

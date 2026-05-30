@@ -7,14 +7,17 @@ import java.util.Objects;
  * Stable identifier for a block stored in a {@link BlockManager}.
  *
  * <ul>
- *   <li>{@link ShuffleBlock} — one block per (shuffle, map task, reduce partition).</li>
+ *   <li>{@link ShuffleBlock} — hash-shuffle bucket: one per (shuffle, map, reduce).</li>
+ *   <li>{@link ShuffleDataBlock} — sort-shuffle map output: one per (shuffle, map),
+ *       holding every reduce partition's records (the reducer slices out its own).</li>
  *   <li>{@link RDDBlock} — a cached RDD partition (one per (rddId, partitionIndex)).</li>
+ *   <li>{@link BroadcastBlock} — a broadcast variable's serialized value.</li>
  * </ul>
  *
  * Real Spark equivalent: org.apache.spark.storage.BlockId
  */
 public abstract sealed class BlockId implements Serializable
-        permits BlockId.ShuffleBlock, BlockId.RDDBlock {
+        permits BlockId.ShuffleBlock, BlockId.ShuffleDataBlock, BlockId.RDDBlock, BlockId.BroadcastBlock {
 
     public abstract String name();
 
@@ -43,6 +46,24 @@ public abstract sealed class BlockId implements Serializable
         @Override public int hashCode() { return Objects.hash(shuffleId, mapId, reduceId); }
     }
 
+    /** {@code shuffledata_<shuffleId>_<mapId>} — one consolidated file per map task. */
+    public static final class ShuffleDataBlock extends BlockId {
+        public final int shuffleId;
+        public final int mapId;
+
+        public ShuffleDataBlock(int shuffleId, int mapId) {
+            this.shuffleId = shuffleId;
+            this.mapId = mapId;
+        }
+
+        @Override public String name() { return "shuffledata_" + shuffleId + "_" + mapId; }
+
+        @Override public boolean equals(Object o) {
+            return o instanceof ShuffleDataBlock b && b.shuffleId == shuffleId && b.mapId == mapId;
+        }
+        @Override public int hashCode() { return Objects.hash(shuffleId, mapId); }
+    }
+
     /** {@code rdd_<rddId>_<partitionIndex>}. */
     public static final class RDDBlock extends BlockId {
         public final int rddId;
@@ -59,5 +80,19 @@ public abstract sealed class BlockId implements Serializable
             return o instanceof RDDBlock b && b.rddId == rddId && b.partitionIndex == partitionIndex;
         }
         @Override public int hashCode() { return Objects.hash(rddId, partitionIndex); }
+    }
+
+    /** {@code broadcast_<broadcastId>}. */
+    public static final class BroadcastBlock extends BlockId {
+        public final long broadcastId;
+
+        public BroadcastBlock(long broadcastId) { this.broadcastId = broadcastId; }
+
+        @Override public String name() { return "broadcast_" + broadcastId; }
+
+        @Override public boolean equals(Object o) {
+            return o instanceof BroadcastBlock b && b.broadcastId == broadcastId;
+        }
+        @Override public int hashCode() { return Long.hashCode(broadcastId); }
     }
 }

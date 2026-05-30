@@ -28,12 +28,16 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
 
     private final int numExecutors;
     private final int coresPerExecutor;
+    /** System properties forwarded to each child JVM (e.g. shuffle manager choice). */
+    private final java.util.Map<String, String> systemProps;
     private final List<Process> processes = new ArrayList<>();
     private final java.util.Map<String, Process> byId = new java.util.concurrent.ConcurrentHashMap<>();
 
-    public ProcessExecutorLauncher(int numExecutors, int coresPerExecutor) {
+    public ProcessExecutorLauncher(int numExecutors, int coresPerExecutor,
+                                   java.util.Map<String, String> systemProps) {
         this.numExecutors = numExecutors;
         this.coresPerExecutor = coresPerExecutor;
+        this.systemProps = systemProps;
     }
 
     @Override
@@ -42,11 +46,15 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
         String classpath = System.getProperty("java.class.path");
         for (int i = 0; i < numExecutors; i++) {
             String execId = "proc-" + i;
-            List<String> cmd = new ArrayList<>(List.of(
-                    javaBin, "-cp", classpath,
-                    CoarseGrainedExecutorBackend.class.getName(),
-                    driverAddress.host, String.valueOf(driverAddress.port),
-                    execId, String.valueOf(coresPerExecutor)));
+            List<String> cmd = new ArrayList<>();
+            cmd.add(javaBin);
+            cmd.add("-cp"); cmd.add(classpath);
+            // Forward configured system properties (e.g. shuffle manager) so the
+            // child builds a SparkEnv compatible with the driver's.
+            systemProps.forEach((k, v) -> cmd.add("-D" + k + "=" + v));
+            cmd.add(CoarseGrainedExecutorBackend.class.getName());
+            cmd.add(driverAddress.host); cmd.add(String.valueOf(driverAddress.port));
+            cmd.add(execId); cmd.add(String.valueOf(coresPerExecutor));
             try {
                 Process p = new ProcessBuilder(cmd)
                         .redirectErrorStream(true)

@@ -9,14 +9,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * A {@link BlockManager} that can serve and fetch blocks over RPC. Each
- * executor runs one, publishing a {@code "BlockManager"} endpoint on its
- * {@link RpcEnv}. A reducer fetching a remote shuffle block asks the owning
- * executor's endpoint for the bytes.
+ * A {@link BlockManager} that can serve and fetch <i>any</i> block over RPC.
+ * Each executor (and the driver) runs one, publishing a {@code "BlockManager"}
+ * endpoint on its {@link RpcEnv}. A consumer fetching a remote block asks the
+ * owning manager's endpoint for the bytes.
  *
- * <p>This is what makes shuffle work across executor JVMs: map outputs stay on
- * the executor that produced them, and reducers pull only the buckets they
- * need, from wherever they live.
+ * <p>This is what makes both shuffle and broadcast work across JVMs: data
+ * stays where it was produced, and consumers pull only what they need from
+ * wherever it lives — addressed purely by {@link BlockId}, so new block kinds
+ * (sort-shuffle data blocks, broadcast blocks) need no transport changes.
  *
  * Real Spark equivalent: org.apache.spark.storage.BlockManager + BlockTransferService
  */
@@ -24,8 +25,8 @@ public final class NetworkBlockManager implements BlockManager, RpcEndpoint {
 
     public static final String ENDPOINT_NAME = "BlockManager";
 
-    /** Reducer → owning executor: fetch this block's bytes (null reply = absent). */
-    public record FetchBlock(int shuffleId, int mapId, int reduceId) implements Serializable {}
+    /** Consumer → owning manager: fetch this block's bytes (null reply = absent). */
+    public record FetchBlock(BlockId id) implements Serializable {}
 
     private final ExecutorLocation location;
     private final RpcEnv rpcEnv;
@@ -48,20 +49,15 @@ public final class NetworkBlockManager implements BlockManager, RpcEndpoint {
     @Override
     public Optional<byte[]> getRemoteBlock(BlockId id, ExecutorLocation loc) {
         if (location.equals(loc)) return getBlock(id);
-        // Pull from the owning executor's block endpoint.
-        if (!(id instanceof BlockId.ShuffleBlock sb)) {
-            throw new UnsupportedOperationException("Only shuffle blocks are network-fetchable: " + id);
-        }
         byte[] bytes = rpcEnv.endpointRef(ENDPOINT_NAME, loc.host, loc.port)
-                .ask(new FetchBlock(sb.shuffleId, sb.mapId, sb.reduceId));
+                .ask(new FetchBlock(id));
         return Optional.ofNullable(bytes);
     }
 
     @Override
     public Object receiveAndReply(Object message) {
         if (message instanceof FetchBlock f) {
-            return getBlock(new BlockId.ShuffleBlock(f.shuffleId(), f.mapId(), f.reduceId()))
-                    .orElse(null);
+            return getBlock(f.id()).orElse(null);
         }
         throw new IllegalArgumentException("BlockManager got unexpected message: " + message);
     }

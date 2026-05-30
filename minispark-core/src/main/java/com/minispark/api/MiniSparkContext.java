@@ -1,5 +1,7 @@
 package com.minispark.api;
 
+import com.minispark.broadcast.Broadcast;
+import com.minispark.broadcast.TorrentBroadcast;
 import com.minispark.executor.SparkEnv;
 import com.minispark.rdd.ParallelCollectionRDD;
 import com.minispark.rdd.RDD;
@@ -16,16 +18,19 @@ import com.minispark.scheduler.cluster.ProcessExecutorLauncher;
 import com.minispark.scheduler.cluster.YarnExecutorLauncher;
 import com.minispark.serializer.JavaSerializer;
 import com.minispark.serializer.Serializer;
-import com.minispark.shuffle.HashShuffleManager;
 import com.minispark.shuffle.ShuffleManager;
+import com.minispark.shuffle.ShuffleManagerFactory;
 import com.minispark.storage.BlockManager;
 import com.minispark.storage.ExecutorLocation;
+import com.minispark.storage.BlockId;
 import com.minispark.storage.MapOutputTracker;
 import com.minispark.storage.NetworkBlockManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Serializable;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -62,6 +67,10 @@ public final class MiniSparkContext implements AutoCloseable {
     private final ExecutorLauncher launcher;
     private final DAGScheduler dagScheduler;
     private final int defaultParallelism;
+    // Static so broadcast ids are unique across all contexts in a JVM. The
+    // executor-side TorrentBroadcast cache is keyed by id, so a per-context
+    // counter would let two contexts mint id=1 and collide in that cache.
+    private static final AtomicLong BROADCAST_ID_GEN = new AtomicLong();
 
     public MiniSparkContext(MiniSparkConf conf) {
         this.conf = conf;
@@ -86,7 +95,9 @@ public final class MiniSparkContext implements AutoCloseable {
         // keeping a single code path with the distributed case.
         ExecutorLocation driverLoc = new ExecutorLocation(rpcEnv.address().host, rpcEnv.address().port);
         this.blockManager = new NetworkBlockManager(driverLoc, rpcEnv);
-        this.shuffleManager = new HashShuffleManager(blockManager, mapOutputTracker, serializer);
+        String shuffleManagerName = conf.get("minispark.shuffle.manager", "hash");
+        this.shuffleManager = ShuffleManagerFactory.create(
+                shuffleManagerName, blockManager, mapOutputTracker, serializer);
 
         // The driver's SparkEnv. In local mode the in-process executors share it.
         SparkEnv.set(new SparkEnv(shuffleManager, blockManager, mapOutputTracker, serializer));
@@ -96,6 +107,10 @@ public final class MiniSparkContext implements AutoCloseable {
         int cores = parseLocalCores(conf.master());
         int executorInstances = conf.getInt("minispark.executor.instances", 1);
         int executorCores = conf.getInt("minispark.executor.cores", cores);
+        // System properties every executor JVM must inherit to be compatible
+        // with the driver. The shuffle wire format depends on this matching.
+        java.util.Map<String, String> executorProps = new java.util.HashMap<>();
+        executorProps.put("minispark.shuffle.manager", shuffleManagerName);
 
         ExecutorLauncher launcher0;
         int totalCores;
@@ -106,12 +121,12 @@ public final class MiniSparkContext implements AutoCloseable {
             int execMemoryMB = conf.getInt("minispark.executor.memoryMB", 512);
             launcher0 = new YarnExecutorLauncher(rpcEnv,
                     yarnMatch.group(1), Integer.parseInt(yarnMatch.group(2)),
-                    conf.appName(), executorInstances, executorCores, execMemoryMB);
+                    conf.appName(), executorInstances, executorCores, execMemoryMB, executorProps);
             totalCores = executorInstances * executorCores;
             expectedExecutors = executorInstances;
         } else if (rpcMode.equals("netty")) {
             // Real separate-JVM executors, locally spawned (no cluster manager).
-            launcher0 = new ProcessExecutorLauncher(executorInstances, executorCores);
+            launcher0 = new ProcessExecutorLauncher(executorInstances, executorCores, executorProps);
             totalCores = executorInstances * executorCores;
             expectedExecutors = executorInstances;
         } else {
@@ -167,6 +182,20 @@ public final class MiniSparkContext implements AutoCloseable {
 
     public <T> RDD<T> parallelize(List<T> data, int numSlices) {
         return new ParallelCollectionRDD<>(this, data, numSlices);
+    }
+
+    /**
+     * Publish {@code value} as a broadcast variable. The value is serialized
+     * into the driver's BlockManager once; the returned handle is tiny and safe
+     * to capture in task closures. Executors fetch-and-cache the value on first
+     * access. {@code value} must be {@link Serializable}.
+     */
+    public <T extends Serializable> Broadcast<T> broadcast(T value) {
+        long bid = BROADCAST_ID_GEN.incrementAndGet();
+        blockManager.putBlock(new BlockId.BroadcastBlock(bid), serializer.serialize(value));
+        LOG.info("Broadcast {} created ({} bytes on driver)", bid,
+                serializer.serialize(value).length);
+        return new TorrentBroadcast<>(bid, blockManager.location());
     }
 
     public RDD<String> textFile(String path) {

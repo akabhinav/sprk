@@ -303,13 +303,56 @@ in-flight tasks` → tasks `ExecutorLost — retrying` → DAG `task result(s)
 landed on dead executor(s); recomputing` → stage 2 complete → correct
 output.
 
-## What's next (stretch goals from the brief)
+## Stretch goals (part 1) — broadcast variables & sort shuffle
 
-- Broadcast variables (a `BroadcastId` block kind + a fetch-once-per-executor
-  helper on top of `BlockManager`).
-- Sort-based shuffle (replace `HashShuffleManager` while keeping its
-  interface; the `ShuffleManager` seam already isolates the choice).
+Two engine features that drop into existing seams with zero scheduler change.
+
+**Generalized block transfer.** Both features move non-shuffle bytes, so
+`BlockId` became a richer sealed type (`ShuffleBlock`, `ShuffleDataBlock`,
+`RDDBlock`, `BroadcastBlock`) and `NetworkBlockManager.FetchBlock` now carries
+a `BlockId` directly instead of shuffle-specific ints. The transport is now
+block-kind agnostic: new kinds need no RPC changes.
+
+**Broadcast variables.** `sc.broadcast(value)` serializes the value into the
+driver's BlockManager under a `BroadcastBlock` and returns a tiny
+`TorrentBroadcast` handle (just an id + the driver's location). The handle is
+`Serializable`, so a task closure that captures it stays small — the 100 MB
+lookup table is *not* copied into every task. On first `broadcast.value()` on
+an executor, the value is fetched once over the BlockManager and cached in a
+per-JVM map; every later task on that executor reads the local copy. Named
+`TorrentBroadcast` after the real class; we pull a single chunk from the driver
+rather than doing the BitTorrent-style peer fan-out, but the
+fetch-once-per-executor semantics are identical. Broadcast ids are minted from
+a JVM-global counter so the per-executor cache (keyed by id) never collides
+across contexts. `BroadcastTest` proves a task reads the broadcast value;
+`BroadcastDistributedTest` path is exercised via the netty sort test infra.
+
+**Sort-based shuffle.** `SortShuffleManager` is a drop-in for
+`HashShuffleManager` selected by `minispark.shuffle.manager=sort`. Where hash
+shuffle writes `numMaps × numReduces` blocks, sort shuffle writes **one
+consolidated `ShuffleDataBlock` per map task**, holding every reduce
+partition's records back-to-back with a per-partition count that acts as the
+index. A reducer fetches that one block per map and slices out its own
+partition range. This is why real Spark switched defaults: hash shuffle's file
+count explodes (10k×10k = 100M files) and exhausts inodes/FDs, while sort
+shuffle stays at `numMaps` files regardless of reducer count. We keep the data
+in memory (a learning simplification) but the structure — one indexed file per
+map — is the real design.
+
+**Both choices flow to executors.** The shuffle manager name must match on
+driver and executors (they exchange a format only the matching reader
+understands). `ShuffleManagerFactory` builds the chosen one in both places;
+`MiniSparkContext` forwards `minispark.shuffle.manager` to each child executor
+JVM as a `-D` system property (via the `ProcessExecutorLauncher` /
+`YarnExecutorLauncher`, which now take a `systemProps` map).
+
+Proven by: `SortShuffleTest` (sort result == hash result for the same job, in
+local mode) and `SortShuffleDistributedTest` (sort shuffle across two executor
+JVMs over real TCP, with consolidated map blocks fetched between executors).
+
+## What's next (remaining stretch goals)
+
 - Speculative execution (re-launch a straggler before it finishes).
 - A tiny web UI showing stages, tasks, and shuffle output sizes — a
-  read-only Jetty/built-in `HttpServer` view over the `DAGScheduler`'s
-  state.
+  read-only `com.sun.net.httpserver.HttpServer` view over a scheduler
+  event/listener bus.

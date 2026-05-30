@@ -9,8 +9,8 @@ import com.minispark.rpc.RpcEnv;
 import com.minispark.serializer.JavaSerializer;
 import com.minispark.serializer.Serializer;
 import com.minispark.shuffle.FetchFailedException;
-import com.minispark.shuffle.HashShuffleManager;
 import com.minispark.shuffle.ShuffleManager;
+import com.minispark.shuffle.ShuffleManagerFactory;
 import com.minispark.storage.ExecutorLocation;
 import com.minispark.storage.MapOutputTracker;
 import com.minispark.storage.NetworkBlockManager;
@@ -164,7 +164,10 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
         NetworkBlockManager blockManager = new NetworkBlockManager(loc, rpcEnv);
         RpcEndpointRef trackerMaster = rpcEnv.endpointRef(MapOutputTracker.ENDPOINT_NAME, driverHost, driverPort);
         MapOutputTracker tracker = MapOutputTracker.worker(trackerMaster);
-        ShuffleManager shuffleManager = new HashShuffleManager(blockManager, tracker, serializer);
+        // Must match the driver's choice; forwarded as a -D by the launcher.
+        String shuffleManagerName = System.getProperty("minispark.shuffle.manager", "hash");
+        ShuffleManager shuffleManager =
+                ShuffleManagerFactory.create(shuffleManagerName, blockManager, tracker, serializer);
         SparkEnv.set(new SparkEnv(shuffleManager, blockManager, tracker, serializer));
 
         RpcEndpointRef driverRef = rpcEnv.endpointRef(
