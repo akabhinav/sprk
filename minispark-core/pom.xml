@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.minispark</groupId>
+        <artifactId>minispark-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>minispark-core</artifactId>
+    <name>MiniSpark Core</name>
+    <!-- The compute engine: RDDs, DAGScheduler, TaskScheduler, executor, shuffle, storage. -->
+    <dependencies>
+        <dependency>
+            <groupId>com.minispark</groupId>
+            <artifactId>minispark-rpc</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId></dependency>
+        <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId></dependency>
+    </dependencies>
+</project>

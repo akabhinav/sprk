@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.minispark</groupId>
+        <artifactId>minispark-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>miniyarn</artifactId>
+    <name>MiniYarn</name>
+    <!-- The YARN-like cluster manager. Wired up in Phase 5. -->
+    <dependencies>
+        <dependency>
+            <groupId>com.minispark</groupId>
+            <artifactId>minispark-rpc</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
+        <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId></dependency>
+        <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId></dependency>
+    </dependencies>
+</project>
