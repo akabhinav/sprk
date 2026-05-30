@@ -158,6 +158,7 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 | [SQL / DataFrame](docs/components/06-sql.md) | types, expressions, plans, analyzer, optimizer, parser |
 | [Web UI & observability](docs/components/07-ui-observability.md) | event bus, status store, UI |
 | [**Runbook**](docs/RUNBOOK.md) | build, run (all modes), config, scripts, troubleshooting |
+| [**Multinode runbook**](docs/RUNBOOK-MULTINODE.md) | spark-submit across machines: RM + NodeManagers on a LAN, host/port/firewall reference |
 | [INTERNALS](docs/INTERNALS.md) | the phase-by-phase build journal & learnings |
 
 ---

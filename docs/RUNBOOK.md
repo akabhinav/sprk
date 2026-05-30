@@ -134,6 +134,9 @@ scripts/minispark-submit.sh \
 ### 3.3 Cluster mode (MiniYarn)
 
 Run the ResourceManager and NodeManagers as **separate processes**, then submit.
+This section covers a single host (all on `127.0.0.1`); to run across **multiple
+machines on a LAN**, see the **[Multinode runbook](RUNBOOK-MULTINODE.md)** (the
+wiring is identical, with routable IPs instead of loopback).
 
 ```mermaid
 flowchart LR
