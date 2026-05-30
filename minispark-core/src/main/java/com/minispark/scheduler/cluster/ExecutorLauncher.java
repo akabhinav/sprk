@@ -12,8 +12,24 @@ import com.minispark.rpc.RpcAddress;
  * a NodeManager-backed launcher.
  */
 public interface ExecutorLauncher {
-    /** Start executors, telling them how to reach the driver. */
+    /** Start the initial executors, telling them how to reach the driver. */
     void launchExecutors(RpcAddress driverAddress);
+
+    /**
+     * Dynamic allocation: launch {@code n} additional executors. Default throws,
+     * so a launcher that can't grow at runtime fails loudly if asked. Returns the
+     * ids of the executors it started.
+     */
+    default java.util.List<String> requestExecutors(int n) {
+        throw new UnsupportedOperationException(
+                getClass().getSimpleName() + " does not support dynamic executor requests");
+    }
+
+    /** Dynamic allocation: stop a specific executor. Default no-op. */
+    default void killExecutor(String executorId) {}
+
+    /** Whether this launcher supports {@link #requestExecutors}/{@link #killExecutor}. */
+    default boolean supportsDynamicAllocation() { return false; }
 
     /** Tear down any launched processes/threads. */
     void stop();

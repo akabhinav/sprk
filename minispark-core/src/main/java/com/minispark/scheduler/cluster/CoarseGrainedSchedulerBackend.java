@@ -75,9 +75,13 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
         final int totalCores;
         int freeCores;
         volatile long lastHeartbeatMs;
+        // When this executor last became fully idle (all cores free). Used by
+        // dynamic allocation to decide it's been idle long enough to release.
+        volatile long idleSinceMs;
         ExecutorData(String id, RpcEndpointRef ref, ExecutorLocation location, int cores, long nowMs) {
             this.id = id; this.ref = ref; this.location = location;
-            this.totalCores = cores; this.freeCores = cores; this.lastHeartbeatMs = nowMs;
+            this.totalCores = cores; this.freeCores = cores;
+            this.lastHeartbeatMs = nowMs; this.idleSinceMs = nowMs;
         }
     }
 
@@ -155,6 +159,39 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
         return new java.util.HashSet<>(executors.keySet());
     }
 
+    // ----- dynamic-allocation accessors -----
+
+    public ExecutorLauncher launcher() { return launcher; }
+    public int numExecutors() { return executors.size(); }
+    public int pendingTaskCount() { synchronized (lock) { return pendingTasks.size(); } }
+    public int runningTaskCount() { return runningTasks.size(); }
+
+    /** Executor ids that currently have no running task, with how long they've been idle. */
+    public java.util.Map<String, Long> idleExecutors() {
+        long now = System.currentTimeMillis();
+        java.util.Set<String> busy = new java.util.HashSet<>(runningTasks.values());
+        java.util.Map<String, Long> idle = new java.util.HashMap<>();
+        synchronized (lock) {
+            for (ExecutorData e : executors.values()) {
+                if (!busy.contains(e.id)) idle.put(e.id, now - e.idleSinceMs);
+            }
+        }
+        return idle;
+    }
+
+    /** Remove an executor we chose to release for being idle (graceful, not a failure). */
+    public void releaseExecutor(String executorId) {
+        synchronized (lock) {
+            ExecutorData e = executors.remove(executorId);
+            if (e != null) {
+                try { e.ref.send(new ClusterMessages.StopExecutor()); } catch (Exception ignored) {}
+                post(new SchedulerEvent.ExecutorRemoved(executorId, "released (idle)",
+                        System.currentTimeMillis()));
+            }
+        }
+        launcher.killExecutor(executorId);
+    }
+
     /**
      * Mark an executor lost (called by the watchdog OR proactively when we
      * know a task failed with ExecutorLost). Fails its in-flight tasks so the
@@ -205,6 +242,17 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
         synchronized (lock) {
             for (TaskSet ts : scheduler.drainPending()) {
                 pendingTasks.addAll(ts.tasks());
+            }
+            // Order the pending tasks by their stage's pool rank (fair/FIFO), so
+            // a stage in a higher-priority pool is offered slots first. Stages
+            // not in the rank map (already finished) sort last.
+            if (!pendingTasks.isEmpty()) {
+                Map<Integer, Integer> ranks = scheduler.stageRanks();
+                List<Task<?>> ordered = new ArrayList<>(pendingTasks);
+                ordered.sort(java.util.Comparator.comparingInt(
+                        t -> ranks.getOrDefault(t.stageId(), Integer.MAX_VALUE)));
+                pendingTasks.clear();
+                pendingTasks.addAll(ordered);
             }
             while (!pendingTasks.isEmpty()) {
                 Task<?> task = pendingTasks.peek();
@@ -286,7 +334,12 @@ public final class CoarseGrainedSchedulerBackend implements SchedulerBackend {
             if (execId != null) {
                 synchronized (lock) {
                     ExecutorData e = executors.get(execId);
-                    if (e != null) e.freeCores++;
+                    if (e != null) {
+                        e.freeCores++;
+                        // Stamp the moment it became fully idle, for dynamic-allocation
+                        // idle-timeout accounting.
+                        if (e.freeCores >= e.totalCores) e.idleSinceMs = System.currentTimeMillis();
+                    }
                 }
             }
             post(new SchedulerEvent.TaskEnd(su.stageId(), su.partitionId(),

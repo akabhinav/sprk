@@ -1,6 +1,8 @@
 package com.minispark.scheduler;
 
 import com.minispark.scheduler.cluster.TaskFailureReason;
+import com.minispark.scheduler.pool.PoolScheduler;
+import com.minispark.scheduler.pool.SchedulingMode;
 import com.minispark.storage.ExecutorLocation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +13,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -79,6 +82,14 @@ public final class TaskScheduler {
     }
     private final ConcurrentMap<Integer, StageBook> books = new ConcurrentHashMap<>();
 
+    // Fair/FIFO scheduling tree. Stages register here on submit; the backend
+    // asks for stageRanks() to order resource offers across pools.
+    private final PoolScheduler poolScheduler;
+    private final AtomicLong submitSeq = new AtomicLong();
+    // Per-thread pool tag (set via MiniSparkContext.setLocalProperty), captured
+    // at submit time so a job's stages land in the right pool.
+    private final ThreadLocal<String> currentPool = new ThreadLocal<>();
+
     // Speculation knobs (configurable in MiniSparkContext via setters below).
     private boolean speculationEnabled = false;
     private long speculationIntervalMs = 500;
@@ -95,8 +106,39 @@ public final class TaskScheduler {
             });
     private final AtomicBoolean speculatorStarted = new AtomicBoolean(false);
 
-    public TaskScheduler() { this(4); }
-    public TaskScheduler(int maxAttempts) { this.maxAttempts = maxAttempts; }
+    public TaskScheduler() { this(4, SchedulingMode.FIFO); }
+    public TaskScheduler(int maxAttempts) { this(maxAttempts, SchedulingMode.FIFO); }
+    public TaskScheduler(int maxAttempts, SchedulingMode mode) {
+        this.maxAttempts = maxAttempts;
+        this.poolScheduler = new PoolScheduler(mode);
+    }
+
+    public PoolScheduler poolScheduler() { return poolScheduler; }
+    public void setCurrentPool(String pool) { currentPool.set(pool); }
+    public void clearCurrentPool() { currentPool.remove(); }
+
+    /** Number of in-flight (launched, not yet completed) tasks for a stage. */
+    private int runningTaskCount(int stageId) {
+        StageBook book = books.get(stageId);
+        if (book == null) return 0;
+        int running = 0;
+        synchronized (book) {
+            for (PartitionState ps : book.byPartition.values()) {
+                if (!ps.completed && ps.launchedAtMs > 0) running++;
+            }
+        }
+        return running;
+    }
+
+    /** Number of not-yet-completed tasks for a stage (pending + running). */
+    private int incompleteTaskCount(int stageId) {
+        StageBook book = books.get(stageId);
+        if (book == null) return 0;
+        synchronized (book) { return book.remaining; }
+    }
+
+    /** Stage order the backend should offer resources in (pool-aware). */
+    public Map<Integer, Integer> stageRanks() { return poolScheduler.stageRanks(); }
 
     public void setSpeculation(boolean enabled, long intervalMs, double quantile, double multiplier) {
         this.speculationEnabled = enabled;
@@ -120,6 +162,10 @@ public final class TaskScheduler {
             pending.add(ts);
             for (PartitionState ps : book.byPartition.values()) ps.attempts = 1;
         }
+        // Register the stage in its pool so resource offers respect fair/FIFO order.
+        int sid = ts.stageId();
+        poolScheduler.addStage(sid, currentPool.get(), submitSeq.incrementAndGet(),
+                () -> runningTaskCount(sid), () -> incompleteTaskCount(sid));
         LOG.debug("Submitted stage {} with {} tasks", ts.stageId(), ts.size());
         backend.reviveOffers();
         return book.done;
@@ -190,6 +236,7 @@ public final class TaskScheduler {
             }
             book.done.complete(results);
             books.remove(stageId);
+            poolScheduler.removeStage(stageId);
         }
     }
 
@@ -229,6 +276,7 @@ public final class TaskScheduler {
                     new RuntimeException("Stage " + stageId + " aborted: task " + partitionId
                             + " failed " + maxAttempts + " times. Last reason: " + reason));
             books.remove(stageId);
+            poolScheduler.removeStage(stageId);
         }
     }
 
@@ -245,6 +293,7 @@ public final class TaskScheduler {
      */
     public void abortStage(int stageId, String reason) {
         StageBook book = books.remove(stageId);
+        poolScheduler.removeStage(stageId);
         if (book != null && !book.done.isDone()) {
             book.done.completeExceptionally(
                     new RuntimeException("Stage " + stageId + " aborted: " + reason));

@@ -433,15 +433,49 @@ we just take whichever copy reports first. Tested with a deliberate 3-second
 stall on one partition: the speculative copy overtakes it, the job finishes in
 ~120ms, and the slow lambda is confirmed to have run twice.
 
+## Tier A engine completion (part 3) — fair scheduler pools & dynamic allocation
+
+**Fair scheduler with pools.** The scheduling decision is now a tree, exactly
+like Spark: a root {@code Pool} orders named pools (FAIR or FIFO), and each pool
+orders its stages (FIFO). The orderings are pure {@code Comparator}s in
+`SchedulingAlgorithms` — FIFO by submission priority; FAIR honoring `minShare`
+first, then preferring the lower weighted load (`running/weight`) so heavier
+pools are allowed proportionally more running tasks before they're "full".
+`PoolScheduler` flattens the tree into a live `stageRanks()` map (recomputed
+from current running-task counts, so FAIR actually rebalances), which the
+backend uses to order resource offers. Stages register on submit (tagged with
+the calling thread's pool via `sc.setSchedulerPool`), and are removed on
+completion/abort. Mode is set with `minispark.scheduler.mode=FAIR`; pool weights
+via `sc.configurePool(name, weight, minShare)`. The decision logic is
+unit-tested in isolation (`SchedulingAlgorithmsTest`, `PoolSchedulerTest`),
+including the case where an idle pool jumps ahead of a busy one under FAIR.
+
+**Dynamic allocation.** The cluster now grows and shrinks with load. The pure
+decision sits in `ExecutorAllocationPolicy`: scale up to `ceil((pending+running)
+/ coresPerExecutor)` clamped to `[min,max]` (minus outstanding requests, so we
+don't over-provision while spawns are in flight); release an executor idle
+longer than the timeout, never below `min`. `ExecutorAllocationManager` polls on
+a timer, reads backlog/idle state from the backend, and calls the launcher.
+`ExecutorLauncher` grew optional `requestExecutors(n)`/`killExecutor(id)` (real
+support in `ProcessExecutorLauncher`, which refactored its spawn path into a
+reusable `spawnOne()`); the backend tracks per-executor `idleSinceMs` and a
+graceful `releaseExecutor`. Enabled with
+`minispark.dynamicAllocation.enabled=true` (+ min/max/idleTimeout). Proven by
+`DynamicAllocationTest`: starts with one executor, hits a 12-task backlog, and
+the allocation manager spawns three more executor JVMs (capped at max=4) before
+the job completes correctly — the log shows
+`requesting 3 executor(s) (pending=11, have=1)`.
+
+The policy/algorithm split (pure functions unit-tested separately from the
+timer/RPC plumbing) is deliberate — it's how Spark keeps `ExecutorAllocation
+Manager` and the fair scheduler testable, and it kept these features from
+needing any integration-test gymnastics to validate the core logic.
+
 ## Tier A — still to come
 
-- Disk-spilling cache (`MEMORY_AND_DISK`)
-- Locality-aware scheduling (PROCESS_LOCAL → NODE_LOCAL → ANY ladder with delay)
-- Checkpointing (snapshot RDD to durable storage to truncate lineage)
-- Dynamic allocation (request more/fewer executors based on backlog)
-- Job cancellation and job groups
-- Fair scheduler with pools
-- Kryo serializer alternative
+- Full multi-level locality ladder (PROCESS_LOCAL → NODE_LOCAL → RACK_LOCAL →
+  ANY) with delay scheduling (we have NODE_LOCAL → ANY today)
+- Kryo serializer alternative (needs the Kryo dependency)
 
 ## Tier B+ — separate multi-session projects
 

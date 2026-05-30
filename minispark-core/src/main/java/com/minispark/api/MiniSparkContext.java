@@ -75,6 +75,7 @@ public final class MiniSparkContext implements AutoCloseable {
     private final LiveListenerBus listenerBus;
     private final AppStatusStore statusStore;
     private final MiniSparkUI ui; // null unless minispark.ui.enabled=true
+    private final com.minispark.scheduler.cluster.ExecutorAllocationManager allocationManager; // null unless enabled
     private final int defaultParallelism;
     // Static so broadcast ids are unique across all contexts in a JVM. The
     // executor-side TorrentBroadcast cache is keyed by id, so a per-context
@@ -119,7 +120,12 @@ public final class MiniSparkContext implements AutoCloseable {
         this.statusStore = new AppStatusStore();
         listenerBus.addListener(statusStore);
 
-        this.taskScheduler = new TaskScheduler();
+        // Scheduling mode across pools: FIFO (default) or FAIR.
+        com.minispark.scheduler.pool.SchedulingMode schedMode =
+                conf.get("minispark.scheduler.mode", "FIFO").equalsIgnoreCase("FAIR")
+                        ? com.minispark.scheduler.pool.SchedulingMode.FAIR
+                        : com.minispark.scheduler.pool.SchedulingMode.FIFO;
+        this.taskScheduler = new TaskScheduler(4, schedMode);
         // Speculation: off by default (cheap to leave on, but adds extra
         // duplicate-task launches for slow tasks). When on, polls every
         // `intervalMs` and launches a duplicate of any task that has been
@@ -175,6 +181,24 @@ public final class MiniSparkContext implements AutoCloseable {
         this.backend.start();
 
         this.dagScheduler = new DAGScheduler(taskScheduler, mapOutputTracker, listenerBus);
+
+        // Dynamic allocation: opt-in, and only meaningful when the launcher can
+        // add/remove executors at runtime (netty/process or yarn modes).
+        if (conf.get("minispark.dynamicAllocation.enabled", "false").equalsIgnoreCase("true")
+                && backend instanceof CoarseGrainedSchedulerBackend cg
+                && cg.launcher().supportsDynamicAllocation()) {
+            int minE = conf.getInt("minispark.dynamicAllocation.minExecutors", 1);
+            int maxE = conf.getInt("minispark.dynamicAllocation.maxExecutors", 10);
+            long idleMs = conf.getInt("minispark.dynamicAllocation.executorIdleTimeoutMs", 60000);
+            long pollMs = conf.getInt("minispark.dynamicAllocation.intervalMs", 1000);
+            var policy = new com.minispark.scheduler.cluster.ExecutorAllocationPolicy(
+                    minE, maxE, executorCores, idleMs);
+            this.allocationManager =
+                    new com.minispark.scheduler.cluster.ExecutorAllocationManager(cg, policy, pollMs);
+            this.allocationManager.start();
+        } else {
+            this.allocationManager = null;
+        }
 
         // Web UI: off by default (so tests don't bind ports); port 0 = ephemeral.
         if (conf.get("minispark.ui.enabled", "false").equalsIgnoreCase("true")) {
@@ -337,6 +361,22 @@ public final class MiniSparkContext implements AutoCloseable {
     public void setJobGroup(String groupId) { jobGroup.set(groupId); }
     public void clearJobGroup() { jobGroup.remove(); }
 
+    // ----- fair scheduler pools -----
+
+    /**
+     * Route jobs launched from this thread into the named scheduler pool. Under
+     * FAIR mode, pools share resources by weight/minShare; a short interactive
+     * job in its own pool isn't blocked behind a long batch job in another.
+     * Mirrors Spark's {@code sc.setLocalProperty("spark.scheduler.pool", name)}.
+     */
+    public void setSchedulerPool(String poolName) { taskScheduler.setCurrentPool(poolName); }
+    public void clearSchedulerPool() { taskScheduler.clearCurrentPool(); }
+
+    /** Configure a pool's relative weight and guaranteed minimum slots. */
+    public void configurePool(String poolName, int weight, int minShare) {
+        taskScheduler.poolScheduler().configurePool(poolName, weight, minShare);
+    }
+
     /** Cancel all in-flight jobs tagged with {@code groupId}. */
     public void cancelJobGroup(String groupId) { dagScheduler.cancelJobs(groupId); }
 
@@ -345,6 +385,7 @@ public final class MiniSparkContext implements AutoCloseable {
 
     @Override
     public void close() {
+        if (allocationManager != null) allocationManager.stop();
         backend.stop();
         taskScheduler.stop();
         if (ui != null) ui.stop();

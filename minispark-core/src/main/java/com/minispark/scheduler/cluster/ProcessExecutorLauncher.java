@@ -30,8 +30,11 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
     private final int coresPerExecutor;
     /** System properties forwarded to each child JVM (e.g. shuffle manager choice). */
     private final java.util.Map<String, String> systemProps;
-    private final List<Process> processes = new ArrayList<>();
     private final java.util.Map<String, Process> byId = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicInteger idGen =
+            new java.util.concurrent.atomic.AtomicInteger();
+    // Captured at launch so runtime requestExecutors() can spawn more.
+    private volatile RpcAddress driverAddress;
 
     public ProcessExecutorLauncher(int numExecutors, int coresPerExecutor,
                                    java.util.Map<String, String> systemProps) {
@@ -42,30 +45,53 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
 
     @Override
     public void launchExecutors(RpcAddress driverAddress) {
+        this.driverAddress = driverAddress;
+        for (int i = 0; i < numExecutors; i++) spawnOne();
+    }
+
+    @Override public boolean supportsDynamicAllocation() { return true; }
+
+    @Override
+    public synchronized List<String> requestExecutors(int n) {
+        List<String> ids = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) ids.add(spawnOne());
+        return ids;
+    }
+
+    @Override
+    public synchronized void killExecutor(String executorId) {
+        Process p = byId.remove(executorId);
+        if (p != null) {
+            LOG.info("Dynamic allocation: stopping idle executor {} (pid {})", executorId, p.pid());
+            p.destroy();
+        }
+    }
+
+    /** Spawn one executor JVM with a fresh id; returns the id. */
+    private String spawnOne() {
+        if (driverAddress == null) throw new IllegalStateException("launchExecutors not called yet");
+        String execId = "proc-" + idGen.getAndIncrement();
         String javaBin = System.getProperty("java.home") + File.separator + "bin" + File.separator + "java";
         String classpath = System.getProperty("java.class.path");
-        for (int i = 0; i < numExecutors; i++) {
-            String execId = "proc-" + i;
-            List<String> cmd = new ArrayList<>();
-            cmd.add(javaBin);
-            cmd.add("-cp"); cmd.add(classpath);
-            // Forward configured system properties (e.g. shuffle manager) so the
-            // child builds a SparkEnv compatible with the driver's.
-            systemProps.forEach((k, v) -> cmd.add("-D" + k + "=" + v));
-            cmd.add(CoarseGrainedExecutorBackend.class.getName());
-            cmd.add(driverAddress.host); cmd.add(String.valueOf(driverAddress.port));
-            cmd.add(execId); cmd.add(String.valueOf(coresPerExecutor));
-            try {
-                Process p = new ProcessBuilder(cmd)
-                        .redirectErrorStream(true)
-                        .redirectOutput(ProcessBuilder.Redirect.INHERIT)
-                        .start();
-                processes.add(p);
-                byId.put(execId, p);
-                LOG.info("Spawned executor JVM {} (pid {})", execId, p.pid());
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to launch executor process " + execId, e);
-            }
+        List<String> cmd = new ArrayList<>();
+        cmd.add(javaBin);
+        cmd.add("-cp"); cmd.add(classpath);
+        // Forward configured system properties (e.g. shuffle manager) so the
+        // child builds a SparkEnv compatible with the driver's.
+        systemProps.forEach((k, v) -> cmd.add("-D" + k + "=" + v));
+        cmd.add(CoarseGrainedExecutorBackend.class.getName());
+        cmd.add(driverAddress.host); cmd.add(String.valueOf(driverAddress.port));
+        cmd.add(execId); cmd.add(String.valueOf(coresPerExecutor));
+        try {
+            Process p = new ProcessBuilder(cmd)
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.INHERIT)
+                    .start();
+            byId.put(execId, p);
+            LOG.info("Spawned executor JVM {} (pid {})", execId, p.pid());
+            return execId;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to launch executor process " + execId, e);
         }
     }
 
@@ -84,10 +110,9 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
 
     @Override
     public void stop() {
-        for (Process p : processes) {
-            p.destroy();
-        }
-        for (Process p : processes) {
+        java.util.Collection<Process> procs = new ArrayList<>(byId.values());
+        for (Process p : procs) p.destroy();
+        for (Process p : procs) {
             try { p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             if (p.isAlive()) p.destroyForcibly();
