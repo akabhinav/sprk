@@ -242,11 +242,17 @@ back to system properties).
 ### Adaptive Query Execution (AQE)
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `minispark.sql.adaptive.enabled` | `false` | turn on the AQE post-shuffle re-planner |
+| `minispark.sql.adaptive.enabled` | `false` | master switch — turns on both AQE shuffle coalesce **and** the runtime join-demote wrapper |
 | `minispark.sql.adaptive.coalescePartitions.targetSizeInBytes` | `67108864` (64 MiB) | target byte size per post-shuffle partition; contiguous reducers below this are fused into one task |
 | `minispark.sql.adaptive.coalescePartitions.minPartitionNum` | `1` | floor on the post-shuffle partition count (so heavy queries don't drop below useful parallelism) |
+| `minispark.sql.adaptive.autoBroadcastJoinThreshold.rows` | `1000` | runtime row threshold below which a non-broadcast join's small side is demoted to a broadcast join (separate from the compile-time `minispark.sql.autoBroadcastJoinThreshold.rows`) |
 
-What this does: after a `ShuffleMapStage` finishes, the driver reads the real per-reducer byte sizes from `MapOutputTracker` and runs `CoalesceShufflePartitionsRule`. If the original 200-way reducer layout writes 8 MiB total, the rule collapses it to one fat range so the downstream stage runs 1 task instead of 200. The job answer is identical; only the task count changes. Gated to the final `ResultStage`, so no downstream shuffle ever sees a re-partitioned input. Mirrors real Spark's `spark.sql.adaptive.*` keys exactly.
+Two runtime AQE rules:
+
+1. **CoalesceShufflePartitionsRule** — after a `ShuffleMapStage` finishes, the driver reads the real per-reducer byte sizes from `MapOutputTracker` and fuses contiguous small reducers into one fat post-shuffle partition. Gated to the final `ResultStage`, so no downstream shuffle ever sees a re-partitioned input.
+2. **AdaptiveJoinExec** — wraps every non-broadcast join (`ShuffledHashJoinExec` or `SortMergeJoinExec`) at compile time. At execute time it materialises + caches both children, learns the actual row counts, and demotes to `BroadcastHashJoinExec` if a side comes in under the runtime threshold and the join type allows building that side. This catches "small after filter/aggregate" cases that the compile-time auto-broadcast misses.
+
+Both leave query semantics unchanged; only the physical strategy is rewritten. Mirrors Spark's `spark.sql.adaptive.*` key names.
 
 ### Join planner
 | Key | Default | Meaning |

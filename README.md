@@ -166,18 +166,19 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 
 ## Status
 
-All build phases plus Tier A (engine completion), Tier B (SQL), an initial
-AQE rule (post-shuffle partition coalesce), and three physical join
-strategies (broadcast-hash / shuffled-hash / sort-merge) are done.
-`mvn clean install` → **BUILD SUCCESS, 164 tests** (4 rpc + 58 core +
-68 sql + 34 examples). The codebase passed a high-effort code review (10
-findings, all fixed). Every distributed use case has an integration test
-that spawns real executor JVMs.
+All build phases plus Tier A (engine completion), Tier B (SQL), three
+physical join strategies (broadcast-hash / shuffled-hash / sort-merge),
+and two AQE rules (post-shuffle partition coalesce + runtime join-demote
+to broadcast) are done. `mvn clean install` → **BUILD SUCCESS, 172 tests**
+(4 rpc + 58 core + 76 sql + 34 examples). The codebase passed a high-effort
+code review (10 findings, all fixed). Every distributed use case has an
+integration test that spawns real executor JVMs.
 
-Adaptive Query Execution: opt-in coalesce of post-shuffle partitions based on
-real map-output sizes (`minispark.sql.adaptive.enabled=true` — see
-[RUNBOOK §4](docs/RUNBOOK.md#adaptive-query-execution-aqe)). Runtime
-shuffled→broadcast join demotion and skew-join split are not implemented
-yet (both need a query-stage materialisation barrier in the SQL planner);
-the compile-time broadcast path is, via `df.broadcast()` or an auto
-threshold.
+Adaptive Query Execution: turn on with `minispark.sql.adaptive.enabled=true`
+— see [RUNBOOK §4](docs/RUNBOOK.md#adaptive-query-execution-aqe). Two
+runtime rules are wired in: (1) coalesce small post-shuffle partitions
+based on real map-output byte sizes; (2) demote shuffled-hash /
+sort-merge joins to broadcast joins when a side comes in under the
+runtime row threshold (catches "small after filter/aggregate" that
+compile-time auto-broadcast misses). Skew-join split remains unimplemented;
+the AdaptiveJoinExec scaffolding makes it the next natural addition.

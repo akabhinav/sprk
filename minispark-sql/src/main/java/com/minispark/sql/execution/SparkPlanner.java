@@ -27,10 +27,18 @@ public final class SparkPlanner {
     /** When neither side is broadcast-eligible, prefer SortMergeJoin over ShuffledHashJoin. */
     private static final String PREFER_SMJ_KEY = "minispark.sql.join.preferSortMergeJoin";
 
+    /** Master switch for runtime AQE (also gates {@code CoalesceShufflePartitionsRule}). */
+    private static final String AQE_ENABLED_KEY = "minispark.sql.adaptive.enabled";
+    /** Row threshold for AQE's runtime broadcast demotion (separate from the static compile-time one). */
+    private static final String AQE_BCAST_THRESHOLD_KEY = "minispark.sql.adaptive.autoBroadcastJoinThreshold.rows";
+    private static final long AQE_BCAST_THRESHOLD_DEFAULT = 1000L;
+
     private final MiniSparkContext sc;
     private final int numPartitions;
     private final int autoBroadcastRowThreshold;
     private final boolean preferSortMergeJoin;
+    private final boolean adaptiveEnabled;
+    private final long adaptiveBroadcastRowThreshold;
 
     public SparkPlanner(MiniSparkContext sc, int numPartitions) {
         this.sc = sc;
@@ -39,6 +47,10 @@ public final class SparkPlanner {
                 sc.conf().getInt(AUTO_BCAST_THRESHOLD_KEY, AUTO_BCAST_THRESHOLD_DEFAULT);
         this.preferSortMergeJoin =
                 sc.conf().get(PREFER_SMJ_KEY, "false").equalsIgnoreCase("true");
+        this.adaptiveEnabled =
+                sc.conf().get(AQE_ENABLED_KEY, "false").equalsIgnoreCase("true");
+        this.adaptiveBroadcastRowThreshold = Long.parseLong(
+                sc.conf().get(AQE_BCAST_THRESHOLD_KEY, Long.toString(AQE_BCAST_THRESHOLD_DEFAULT)));
     }
 
     public PhysicalPlan plan(LogicalPlan logical) {
@@ -125,13 +137,24 @@ public final class SparkPlanner {
             }
         }
 
-        // Non-broadcast path: pick between shuffled-hash and sort-merge.
-        if (preferSortMergeJoin) {
-            return new SortMergeJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
-                    plan(j.left()), plan(j.right()), sc, numPartitions);
+        // Non-broadcast path: pick the fallback strategy. If AQE is on, wrap
+        // it in AdaptiveJoinExec so the decision can be revisited at runtime
+        // (demote to broadcast when an actual side comes in small).
+        AdaptiveJoinExec.Fallback fb = preferSortMergeJoin
+                ? AdaptiveJoinExec.Fallback.SORT_MERGE
+                : AdaptiveJoinExec.Fallback.SHUFFLED_HASH;
+        PhysicalPlan leftPlan = plan(j.left());
+        PhysicalPlan rightPlan = plan(j.right());
+        if (adaptiveEnabled) {
+            return new AdaptiveJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
+                    leftPlan, rightPlan, fb, adaptiveBroadcastRowThreshold, sc, numPartitions);
         }
-        return new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
-                plan(j.left()), plan(j.right()));
+        return switch (fb) {
+            case SORT_MERGE -> new SortMergeJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
+                    leftPlan, rightPlan, sc, numPartitions);
+            case SHUFFLED_HASH -> new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
+                    leftPlan, rightPlan);
+        };
     }
 
     private PhysicalPlan broadcast(com.minispark.sql.plan.Join j, boolean buildIsLeft) {

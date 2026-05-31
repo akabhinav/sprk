@@ -169,11 +169,33 @@ sort-merge wins over shuffled-hash, with the eligibility checks:
   hash table per key group — in MiniSpark we still sort in memory, so the
   benefit is pedagogical, not memory-real.
 
-What's NOT implemented yet: runtime demotion (turn a planned
-`ShuffledHashJoinExec` or `SortMergeJoinExec` into `BroadcastHashJoinExec`
-after a parent map stage materialises and one side turns out small). That
-needs a query-stage materialisation barrier in the SQL planner — a natural
-follow-on to `CoalesceShufflePartitionsRule`.
+### Runtime AQE join demotion
+
+When `minispark.sql.adaptive.enabled=true`, the planner wraps every non-broadcast
+join in `AdaptiveJoinExec`. At execute time the wrapper:
+
+1. Calls `.execute().cache()` on both children — building the lineage with a
+   cache directive.
+2. Calls `.count()` on each, which forces materialisation; the cached blocks
+   sit in `BlockManager` ready for a second read.
+3. Reads the actual row counts. If a side fits under
+   `minispark.sql.adaptive.autoBroadcastJoinThreshold.rows` (default 1000)
+   AND `BroadcastHashJoinExec.{canBuildLeft, canBuildRight}` allows building
+   that side for this join type, swaps to `BroadcastHashJoinExec` reading
+   from the cached RDDs (no second shuffle).
+4. Otherwise rebuilds the originally planned `ShuffledHashJoinExec` or
+   `SortMergeJoinExec` over the same cached children.
+
+This catches the "small after filter/aggregate" pattern that compile-time
+auto-broadcast misses — the planner can't see that `bigTable.where(rare_predicate)`
+will produce 20 rows, but AQE learns it from a `count()` round-trip and
+demotes the join accordingly. Real Spark's equivalent is the
+`AdaptiveSparkPlanExec` → `DemoteBroadcastHashJoin` chain over query stages.
+
+What's NOT implemented yet: skew-join split (detect one reducer that's
+much larger than its siblings and break it into N sub-tasks). That needs
+the `ShuffleReader` to accept `[startMapId, endMapId)` ranges plus
+co-partitioned join-side replication.
 
 ## SQL parser
 

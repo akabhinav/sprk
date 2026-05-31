@@ -556,6 +556,8 @@ the same path you traced here.
 | sort-merge join | `sql.execution.SortMergeJoinExec` | same |
 | zip two RDDs per partition | `rdd.ZippedPartitionsRDD2` | same |
 | broadcast hint | `sql.plan.BroadcastHint` / `DataFrame.broadcast()` | `ResolvedHint(_, HintInfo(BROADCAST))` |
+| AQE join wrapper (runtime demote) | `sql.execution.AdaptiveJoinExec` | `sql.execution.adaptive.{AdaptiveSparkPlanExec, DemoteBroadcastHashJoin}` |
+| materialised intermediate scan | `sql.execution.MaterializedRDDScanExec` | `sql.execution.adaptive.QueryStageExec` |
 | task dispatcher | `scheduler.TaskScheduler` | `TaskSchedulerImpl` + `TaskSetManager` |
 | backend | `cluster.CoarseGrainedSchedulerBackend` | same |
 | executor backend | `cluster.CoarseGrainedExecutorBackend` | same |
