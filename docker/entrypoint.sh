@@ -8,5 +8,6 @@ case "$role" in
   rm)     exec java -cp "$CP" com.miniyarn.rm.ResourceManager "${1:-rm}" "${2:-8032}" ;;
   nm)     exec java -cp "$CP" com.miniyarn.nm.NodeManager "$@" ;;          # <name> <rmHost> <rmPort> <host> <port> <cores> <memMB>
   submit) exec java -cp "$CP" com.minispark.deploy.MiniSparkSubmit "$@" ;; # --class ... --master miniyarn://rm:8032 ...
-  *)      echo "usage: entrypoint.sh {rm|nm <args>|submit <args>}" >&2; exit 1 ;;
+  all)    exec java -cp "$CP" com.minispark.examples.AllExamplesDriver "$@" ;; # <rmHost> <rmPort> <driverHost> [sharedDir]
+  *)      echo "usage: entrypoint.sh {rm|nm <args>|submit <args>|all <args>}" >&2; exit 1 ;;
 esac

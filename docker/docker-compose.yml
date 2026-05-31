@@ -1,12 +1,19 @@
 # A multi-node MiniSpark cluster in containers: a ResourceManager, two
-# NodeManagers, and a one-shot submit client — each its own container with its
-# own hostname/IP on the user-defined network `msnet`. Executors are spawned by
-# the NodeManagers inside their containers and advertise their container IP, so
+# NodeManagers, and a client — each its own container with its own hostname/IP
+# on the user-defined network `msnet`. Executors are spawned by the
+# NodeManagers inside their containers and advertise their container IP, so
 # RPC, shuffle-fetch and broadcast all cross real container-to-container TCP.
+#
+# The `shared` named volume is mounted at /shared on EVERY node, so the
+# file-I/O examples (saveAsTextFile, checkpoint, CSV round-trip) work across
+# nodes — the real-cluster requirement of shared storage (HDFS/S3/NFS),
+# satisfied here by one volume.
 #
 #   docker compose -f docker/docker-compose.yml build
 #   docker compose -f docker/docker-compose.yml up -d rm nm1 nm2
-#   docker compose -f docker/docker-compose.yml run --rm submit
+#   docker compose -f docker/docker-compose.yml run --rm all      # full example battery
+#   docker compose -f docker/docker-compose.yml run --rm submit   # or just WordCount
+#   docker compose -f docker/docker-compose.yml down -v
 services:
   rm:
     build: { context: .., dockerfile: docker/Dockerfile }
@@ -14,22 +21,34 @@ services:
     hostname: rm
     command: ["rm", "rm", "8032"]
     networks: [msnet]
+    volumes: [shared:/shared]
   nm1:
     image: minispark:latest
     hostname: nm1
     command: ["nm", "nm1", "rm", "8032", "nm1", "8041", "2", "1024"]
     depends_on: [rm]
     networks: [msnet]
+    volumes: [shared:/shared]
   nm2:
     image: minispark:latest
     hostname: nm2
     command: ["nm", "nm2", "rm", "8032", "nm2", "8041", "2", "1024"]
     depends_on: [rm]
     networks: [msnet]
+    volumes: [shared:/shared]
+  # The full example battery: every feature category, asserted, across the
+  # cluster. Exits non-zero if any check fails.
+  all:
+    image: minispark:latest
+    hostname: driver
+    command: ["all", "rm", "8032", "driver", "/shared"]
+    depends_on: [rm, nm1, nm2]
+    networks: [msnet]
+    volumes: [shared:/shared]
+  # Single WordCount via the spark-submit equivalent.
   submit:
     image: minispark:latest
     hostname: driver
-    # WordCount via the spark-submit equivalent, across the cluster.
     command: ["submit",
               "--class", "com.minispark.examples.WordCount",
               "--master", "miniyarn://rm:8032",
@@ -38,6 +57,9 @@ services:
               "/src/minispark-examples/src/test/resources/book.txt"]
     depends_on: [rm, nm1, nm2]
     networks: [msnet]
+    volumes: [shared:/shared]
 networks:
   msnet:
     driver: bridge
+volumes:
+  shared:
