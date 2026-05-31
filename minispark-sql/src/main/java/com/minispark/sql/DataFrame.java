@@ -106,6 +106,29 @@ public final class DataFrame {
         return new DataFrame(session, new com.minispark.sql.plan.BroadcastHint(logicalPlan));
     }
 
+    /**
+     * Append a new column derived from {@code value}, named {@code name}. If
+     * the column is a window expression ({@code Window.rowNumber().over(...)})
+     * it's lifted into a dedicated {@link com.minispark.sql.plan.Window} node;
+     * otherwise it's appended via a Project. The new column always lands at
+     * the end of the schema. Replacing existing columns of the same name is
+     * not supported (yet) — append-only.
+     */
+    public DataFrame withColumn(String name, Column value) {
+        Expression e = value.expr();
+        if (e instanceof com.minispark.sql.expr.window.WindowExpression we) {
+            return new DataFrame(session, new com.minispark.sql.plan.Window(
+                    List.of(we), List.of(name), logicalPlan));
+        }
+        // Project that keeps every existing column + the new one aliased.
+        List<Expression> outputs = new ArrayList<>();
+        for (com.minispark.sql.types.StructField f : logicalPlan.schema().fields()) {
+            outputs.add(new com.minispark.sql.expr.UnresolvedAttribute(f.name()));
+        }
+        outputs.add(new com.minispark.sql.expr.Alias(e, name));
+        return new DataFrame(session, new com.minispark.sql.plan.Project(outputs, logicalPlan));
+    }
+
     /** Group by the given columns; call {@code .agg(...)} on the result. */
     public GroupedData groupBy(Column... cols) {
         List<Expression> exprs = new ArrayList<>(cols.length);

@@ -192,10 +192,39 @@ will produce 20 rows, but AQE learns it from a `count()` round-trip and
 demotes the join accordingly. Real Spark's equivalent is the
 `AdaptiveSparkPlanExec` → `DemoteBroadcastHashJoin` chain over query stages.
 
-What's NOT implemented yet: skew-join split (detect one reducer that's
-much larger than its siblings and break it into N sub-tasks). That needs
-the `ShuffleReader` to accept `[startMapId, endMapId)` ranges plus
-co-partitioned join-side replication.
+### Window functions
+
+Per-row computation over a partitioned, ordered set of rows — different
+from aggregates, which collapse a group. Three ranking functions are
+wired in: `ROW_NUMBER`, `RANK`, `DENSE_RANK`. PARTITION BY + ORDER BY are
+supported; frames (`ROWS/RANGE BETWEEN`) and aggregate-over-window
+(`SUM(x) OVER (...)`) are not yet.
+
+DataFrame API:
+
+```java
+WindowSpec w = Window.partitionBy("dept").orderByDesc("salary");
+df.withColumn("rank", Window.rank().over(w));
+```
+
+Lowering:
+- `df.withColumn(name, Window.rank().over(spec))` builds a `plan.Window`
+  logical node above the child plan, naming the appended output column.
+- `Analyzer` walks the `Window` node like any other: it binds
+  `UnresolvedAttribute`s in the partition and order expressions to
+  `BoundReference`s.
+- `SparkPlanner` lowers to `execution.WindowExec`, which: maps to
+  `(partitionKey, row)`, shuffles through a `HashPartitioner` so all
+  rows with the same partitionKey land on the same task, then per task
+  buckets by exact key, sorts each bucket by ORDER BY, and calls each
+  `WindowFunction.evaluate(rows, orderKeys)` to get one output per row.
+- Empty `PARTITION BY` funnels every row to a single task via a constant
+  key — matches the SQL semantics of "the window is the entire result
+  set" (e.g. `ROW_NUMBER() OVER (ORDER BY ts)`).
+
+What's NOT implemented yet: window frames; aggregate windows
+(`SUM(x) OVER (...)`); `LAG`/`LEAD` offset functions; SQL parser syntax
+for the `OVER` clause (DataFrame API only).
 
 ## SQL parser
 

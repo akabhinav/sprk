@@ -575,6 +575,9 @@ the same path you traced here.
 | materialised intermediate scan | `sql.execution.MaterializedRDDScanExec` | `sql.execution.adaptive.QueryStageExec` |
 | AQE skew partition split | `scheduler.adaptive.OptimizeSkewedPartitionsRule` | `sql.execution.adaptive.OptimizeSkewedJoin` |
 | per-(map,reducer) byte sizes | `MapOutputTracker.getMapSizesPerReducer` | `MapStatus.getSizeForBlock(reduceId)` |
+| window functions | `sql.expr.window.{WindowFunction, RankingFunctions, WindowSpec, WindowExpression}` | `catalyst.expressions.{WindowFunction, RowNumber/Rank/DenseRank, WindowSpec, WindowExpression}` |
+| Window logical/physical | `sql.plan.Window` / `sql.execution.WindowExec` | same |
+| Window builder | `sql.Window` (static factory) | `sql.expressions.Window` |
 | task dispatcher | `scheduler.TaskScheduler` | `TaskSchedulerImpl` + `TaskSetManager` |
 | backend | `cluster.CoarseGrainedSchedulerBackend` | same |
 | executor backend | `cluster.CoarseGrainedExecutorBackend` | same |

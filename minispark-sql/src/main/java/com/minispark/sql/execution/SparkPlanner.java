@@ -88,6 +88,10 @@ public final class SparkPlanner {
         if (logical instanceof com.minispark.sql.plan.Distinct d) {
             return new DistinctExec(plan(d.child()));
         }
+        if (logical instanceof com.minispark.sql.plan.Window w) {
+            return new WindowExec(w.windowExprs(), w.outputNames(), w.schema(),
+                    plan(w.child()), sc, numPartitions);
+        }
         throw new UnsupportedOperationException("No physical strategy for " + logical);
     }
 

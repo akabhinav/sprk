@@ -93,6 +93,22 @@ public final class Analyzer {
             for (var a : agg.aggregates()) boundAggs.add(a.bind(in, this::bind));
             return new com.minispark.sql.plan.Aggregate(boundGroups, boundAggs, agg.child());
         }
+        if (withResolvedChildren instanceof com.minispark.sql.plan.Window win) {
+            StructType in = win.child().schema();
+            List<com.minispark.sql.expr.window.WindowExpression> boundExprs = new ArrayList<>();
+            for (var w : win.windowExprs()) {
+                var spec = w.spec();
+                List<Expression> boundPart = new ArrayList<>();
+                for (Expression p : spec.partitionBy()) boundPart.add(bind(p, in));
+                List<com.minispark.sql.plan.SortOrder> boundOrder = new ArrayList<>();
+                for (var o : spec.orderBy()) {
+                    boundOrder.add(new com.minispark.sql.plan.SortOrder(bind(o.expr(), in), o.ascending()));
+                }
+                boundExprs.add(new com.minispark.sql.expr.window.WindowExpression(
+                        w.function(), new com.minispark.sql.expr.window.WindowSpec(boundPart, boundOrder)));
+            }
+            return new com.minispark.sql.plan.Window(boundExprs, win.outputNames(), win.child());
+        }
         return withResolvedChildren;
     }
 
