@@ -300,15 +300,15 @@ mvn -pl minispark-sql      test -Dtest=SqlDistributedTest            # spark.sql
 They **abort (skip) gracefully** if the sandbox can't spawn child JVMs, rather
 than failing.
 
-### Distributed example gallery (38 worked examples)
+### Distributed example gallery (41 worked examples)
 
-`minispark-examples/.../dist/` holds 38 end-to-end examples covering **every**
+`minispark-examples/.../dist/` holds 41 end-to-end examples covering **every**
 feature, all run across a driver + 2 executor JVMs over TCP (shared harness:
 `DistTestSupport` — spins up the cluster on a watchdog thread and aborts
 cleanly if JVMs can't spawn).
 
 ```bash
-# all 38 at once
+# all 41 at once
 mvn -pl minispark-examples test -Dtest='*DistributedExamplesTest'
 ```
 
@@ -352,6 +352,9 @@ mvn -pl minispark-examples test -Dtest='*DistributedExamplesTest'
 | 36 | checkpoint | lineage truncation to reliable storage |
 | 37 | cogroup | group both sides by key |
 | 38 | FAIR scheduler pool | `scheduler.mode=FAIR` + weighted pool |
+| 39 | dynamic allocation | cluster grows past 1 executor under a backlog |
+| 40 | speculation | a straggler partition is speculatively re-launched |
+| 41 | MiniYarn cluster manager | RM + 2 NodeManagers; executors spread across both |
 
 Run one group:
 ```bash
@@ -361,7 +364,12 @@ mvn -pl minispark-examples test -Dtest=SqlDistributedExamplesTest             # 
 mvn -pl minispark-examples test -Dtest=AqeDistributedExamplesTest             # 21–25
 mvn -pl minispark-examples test -Dtest=WindowOuterJoinDistributedExamplesTest # 26–31
 mvn -pl minispark-examples test -Dtest=EngineRddDistributedExamplesTest       # 32–38
+mvn -pl minispark-examples test -Dtest=InfraDistributedExamplesTest           # 39–41
 ```
+
+Examples 39–41 assert on observable **control-plane** behaviour (executor
+count growing, the straggler's re-launch proven via a filesystem marker,
+container placement across both NodeManagers) — not just the computed result.
 
 ---
 

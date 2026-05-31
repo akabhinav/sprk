@@ -257,6 +257,14 @@ public final class MiniSparkContext implements AutoCloseable {
     public SchedulerBackend backend() { return backend; }
     public ExecutorLauncher launcher() { return launcher; }
     public AppStatusStore statusStore() { return statusStore; }
+
+    /**
+     * Block until the listener bus has delivered every event posted so far,
+     * so a caller can read {@link #statusStore()} synchronously right after an
+     * action without racing the async dispatcher. Returns {@code true} if the
+     * bus drained within {@code timeoutMs}.
+     */
+    public boolean awaitListenerBus(long timeoutMs) { return listenerBus.waitUntilEmpty(timeoutMs); }
     /** The web UI's bound port, or -1 if the UI is disabled. */
     public int uiPort() { return ui == null ? -1 : ui.boundPort(); }
     public BlockManager blockManager() { return blockManager; }

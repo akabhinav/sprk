@@ -173,11 +173,13 @@ runtime join-demote to broadcast), window functions
 (ROW_NUMBER / RANK / DENSE_RANK), and Spark-style memory management
 (UnifiedMemoryManager + TaskMemoryManager + spillable
 ExternalAppendOnlyMap + `-Xmx` enforcement) are done.
-`mvn clean install` → **BUILD SUCCESS, 218 tests**
-(4 rpc + 79 core + 83 sql + 52 examples). Every feature has an end-to-end
-example that runs across a driver + 2 executor JVMs over TCP — 38 worked
-distributed examples in `minispark-examples/.../dist/` (see the
-[example gallery](docs/RUNBOOK.md#distributed-example-gallery-38-worked-examples)).
+`mvn clean install` → **BUILD SUCCESS, 221 tests**
+(4 rpc + 79 core + 83 sql + 55 examples). Every feature has an end-to-end
+example that runs across a driver + 2 executor JVMs over TCP — 41 worked
+distributed examples in `minispark-examples/.../dist/` (data-plane ops, SQL,
+AQE, window functions, memory/spill, plus control-plane: dynamic allocation,
+speculation, and the MiniYarn cluster manager). See the
+[example gallery](docs/RUNBOOK.md#distributed-example-gallery-41-worked-examples).
 The codebase passed a high-effort code review (10 findings, all fixed).
 Every distributed use case has an integration test that spawns real
 executor JVMs.

@@ -67,6 +67,7 @@ final class AqeSkewSplitIntegrationTest {
                     new ShuffledRDD<>(sc, pairs, new HashPartitioner(8));
             List<Tuple2<String, Integer>> result = shuffled.collect();
 
+            sc.awaitListenerBus(5000);
             int resultTasks = -1;
             for (AppStatusStore.StageView v : sc.statusStore().stages()) {
                 if ("ResultStage".equals(v.name())) resultTasks = v.numTasks();

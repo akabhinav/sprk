@@ -51,6 +51,8 @@ final class AqeCoalesceIntegrationTest {
             Map<String, Integer> tally = new HashMap<>();
             for (Tuple2<String, Integer> t : result) tally.merge(t._1(), t._2(), Integer::sum);
 
+            // The status store is fed asynchronously; drain the bus before reading it.
+            sc.awaitListenerBus(5000);
             int resultTasks = -1;
             for (AppStatusStore.StageView v : sc.statusStore().stages()) {
                 if ("ResultStage".equals(v.name())) resultTasks = v.numTasks();
@@ -90,6 +92,7 @@ final class AqeCoalesceIntegrationTest {
                     .reduceByKey(Integer::sum, new HashPartitioner(16))
                     .collect();
 
+            sc.awaitListenerBus(5000);
             int resultTasks = -1;
             for (AppStatusStore.StageView v : sc.statusStore().stages()) {
                 if ("ResultStage".equals(v.name())) resultTasks = v.numTasks();

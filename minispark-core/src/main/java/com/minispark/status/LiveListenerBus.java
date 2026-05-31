@@ -29,6 +29,14 @@ public final class LiveListenerBus {
     private final Thread dispatcher;
     private volatile boolean stopped = false;
 
+    // Posted/processed counters let callers (notably tests reading the async
+    // AppStatusStore) block until every event posted so far has been delivered.
+    // post() stays lock-free; only the rarely-called waitUntilEmpty contends.
+    private final java.util.concurrent.atomic.AtomicLong postedCount =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final Object processedLock = new Object();
+    private long processedCount = 0;
+
     public LiveListenerBus() {
         this.dispatcher = new Thread(this::dispatchLoop, "listener-bus");
         this.dispatcher.setDaemon(true);
@@ -40,7 +48,34 @@ public final class LiveListenerBus {
     /** Non-blocking. Dropped silently after {@link #stop()}. */
     public void post(SchedulerEvent event) {
         if (stopped) return;
+        postedCount.incrementAndGet();
         queue.offer(event);
+    }
+
+    /**
+     * Block until every event posted <i>before this call</i> has been
+     * delivered to all listeners, or the timeout elapses. Returns {@code true}
+     * if the bus drained in time. Lets a caller read the {@link AppStatusStore}
+     * synchronously after an action without racing the async dispatcher.
+     *
+     * Real Spark equivalent: org.apache.spark.scheduler.LiveListenerBus#waitUntilEmpty.
+     */
+    public boolean waitUntilEmpty(long timeoutMs) {
+        long target = postedCount.get();
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        synchronized (processedLock) {
+            while (processedCount < target) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) return false;
+                try {
+                    processedLock.wait(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     private void dispatchLoop() {
@@ -59,6 +94,10 @@ public final class LiveListenerBus {
                 } catch (Throwable t) {
                     LOG.warn("Listener {} threw on {}: {}", l, event, t.toString());
                 }
+            }
+            synchronized (processedLock) {
+                processedCount++;
+                processedLock.notifyAll();
             }
         }
     }
