@@ -38,6 +38,20 @@ sequenceDiagram
     WD->>WD: DAGScheduler.handleExecutorLost(location)
 ```
 
+### The other direction — executor detecting a dead *driver*
+
+Heartbeats are one-way (executor → driver), so the driver's watchdog above only
+covers one failure direction. The symmetric case — the **driver** crashing —
+is handled executor-side: `CoarseGrainedExecutorBackend.sendHeartbeat` counts
+consecutive heartbeat-send failures and, after
+`minispark.executor.maxHeartbeatFailures` of them (default 10 ≈ 10s), a
+standalone executor JVM calls `System.exit` rather than linger as a zombie
+holding cores and memory. This covers both transports: a crashed netty driver
+or a crashed MiniYarn AM leaves no orphaned executor processes. In local mode
+(executor shares the driver JVM) the watchdog never fires — exiting would be
+suicide-by-driver. Proven by `ExecutorDriverDeathTest`, which spawns a real
+executor process, kills its driver, and asserts the process exits on its own.
+
 ## Lineage recovery — the "R" in RDD
 
 When an executor dies, the shuffle map outputs it produced are gone. The

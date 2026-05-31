@@ -55,6 +55,14 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
                 t.setDaemon(true);
                 return t;
             });
+    // Driver-liveness watchdog. Heartbeats are one-way; if enough consecutive
+    // ones fail, the driver is gone — a standalone executor JVM must exit
+    // rather than linger as a zombie holding cores/memory. Touched only on the
+    // single heartbeat thread, so no synchronization needed (besides `stopping`).
+    private final int maxHeartbeatFailures =
+            Integer.getInteger("minispark.executor.maxHeartbeatFailures", 10);
+    private int heartbeatFailures = 0;
+    private volatile boolean stopping = false;
 
     public CoarseGrainedExecutorBackend(String executorId, RpcEnv rpcEnv, RpcEndpointRef driverRef,
                                         int cores, Serializer serializer, boolean ownsRpcEnv) {
@@ -87,8 +95,27 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
     }
 
     private void sendHeartbeat() {
-        try { driverRef.send(new ClusterMessages.Heartbeat(executorId)); }
-        catch (Exception e) { LOG.debug("Heartbeat failed: {}", e.toString()); }
+        if (stopping) return;
+        try {
+            driverRef.send(new ClusterMessages.Heartbeat(executorId));
+            heartbeatFailures = 0;
+        } catch (Exception e) {
+            heartbeatFailures++;
+            LOG.debug("Heartbeat failed ({}/{}): {}", heartbeatFailures, maxHeartbeatFailures, e.toString());
+            // The driver vanished. In a standalone executor JVM, exit so we don't
+            // become a zombie. In local mode (ownsRpcEnv=false) the executor shares
+            // the driver's JVM, so exiting would be suicide-by-driver — never do it.
+            if (ownsRpcEnv && !stopping && heartbeatFailures >= maxHeartbeatFailures) {
+                LOG.error("Executor {} lost contact with the driver after {} consecutive "
+                        + "heartbeat failures; shutting down", executorId, heartbeatFailures);
+                stopping = true;
+                heartbeater.shutdown();
+                executor.shutdown();
+                // System.exit (not halt) so shutdown hooks — incl. DiskStore temp
+                // cleanup — still run before the process leaves.
+                System.exit(1);
+            }
+        }
     }
 
     @Override
@@ -100,6 +127,7 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
                     (ctx, err) -> reportFailed(ctx, lt, err));
         } else if (message instanceof ClusterMessages.StopExecutor) {
             LOG.info("Executor {} stopping", executorId);
+            stopping = true;   // graceful stop — don't let the watchdog also fire
             heartbeater.shutdownNow();
             executor.shutdown();
             if (ownsRpcEnv) rpcEnv.shutdown();
@@ -137,6 +165,7 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
 
     @Override
     public void onStop() {
+        stopping = true;
         heartbeater.shutdownNow();
         executor.shutdown();
     }
