@@ -111,8 +111,19 @@ public final class MiniSparkContext implements AutoCloseable {
         this.shuffleManager = ShuffleManagerFactory.create(
                 shuffleManagerName, blockManager, mapOutputTracker, serializer);
 
+        // Unified memory manager: splits the executor budget into storage and
+        // execution pools with a movable boundary. The same budget used by the
+        // MemoryStore is the total; storageFraction (default 0.5) carves it.
+        double storageFraction = Double.parseDouble(
+                conf.get("minispark.memory.storageFraction", "0.5"));
+        com.minispark.memory.UnifiedMemoryManager memoryManager =
+                new com.minispark.memory.UnifiedMemoryManager(maxMem, storageFraction);
+        // Wire BlockManager → memory manager so storage acquisitions flow
+        // through the pool and execution reclaim can evict LRU on demand.
+        ((NetworkBlockManager) blockManager).setUnifiedMemoryManager(memoryManager);
+
         // The driver's SparkEnv. In local mode the in-process executors share it.
-        SparkEnv.set(new SparkEnv(shuffleManager, blockManager, mapOutputTracker, serializer));
+        SparkEnv.set(new SparkEnv(shuffleManager, blockManager, mapOutputTracker, serializer, memoryManager));
 
         // Event bus + status store feed the (optional) web UI. The scheduler and
         // backend post events; the store accumulates them; the UI renders the store.
@@ -145,6 +156,7 @@ public final class MiniSparkContext implements AutoCloseable {
         java.util.Map<String, String> executorProps = new java.util.HashMap<>();
         executorProps.put("minispark.shuffle.manager", shuffleManagerName);
         executorProps.put("minispark.memory.store.maxBytes", String.valueOf(maxMem));
+        executorProps.put("minispark.memory.storageFraction", String.valueOf(storageFraction));
         if (localDir != null) executorProps.put("minispark.local.dir", localDir);
 
         ExecutorLauncher launcher0;
@@ -161,7 +173,9 @@ public final class MiniSparkContext implements AutoCloseable {
             expectedExecutors = executorInstances;
         } else if (rpcMode.equals("netty")) {
             // Real separate-JVM executors, locally spawned (no cluster manager).
-            launcher0 = new ProcessExecutorLauncher(executorInstances, executorCores, executorProps);
+            int execMemoryMB = conf.getInt("minispark.executor.memoryMB", 0);
+            launcher0 = new ProcessExecutorLauncher(
+                    executorInstances, executorCores, execMemoryMB, executorProps);
             totalCores = executorInstances * executorCores;
             expectedExecutors = executorInstances;
         } else {

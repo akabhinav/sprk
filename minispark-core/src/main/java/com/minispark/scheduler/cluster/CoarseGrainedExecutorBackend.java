@@ -171,7 +171,15 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
         String shuffleManagerName = System.getProperty("minispark.shuffle.manager", "hash");
         ShuffleManager shuffleManager =
                 ShuffleManagerFactory.create(shuffleManagerName, blockManager, tracker, serializer);
-        SparkEnv.set(new SparkEnv(shuffleManager, blockManager, tracker, serializer));
+        // Per-executor UnifiedMemoryManager. The split between storage and
+        // execution pools is configurable via -D; the total is the same maxMem
+        // the MemoryStore already uses. Tasks see this via SparkEnv.memoryManager().
+        double storageFraction = Double.parseDouble(
+                System.getProperty("minispark.memory.storageFraction", "0.5"));
+        com.minispark.memory.UnifiedMemoryManager memoryManager =
+                new com.minispark.memory.UnifiedMemoryManager(maxMem, storageFraction);
+        blockManager.setUnifiedMemoryManager(memoryManager);
+        SparkEnv.set(new SparkEnv(shuffleManager, blockManager, tracker, serializer, memoryManager));
 
         RpcEndpointRef driverRef = rpcEnv.endpointRef(
                 CoarseGrainedSchedulerBackend.ENDPOINT_NAME, driverHost, driverPort);

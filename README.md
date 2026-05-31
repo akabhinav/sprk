@@ -169,9 +169,12 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 All build phases plus Tier A (engine completion), Tier B (SQL), three
 physical join strategies (broadcast-hash / shuffled-hash / sort-merge),
 three AQE rules (post-shuffle partition coalesce, skew-partition split,
-runtime join-demote to broadcast), and window functions
-(ROW_NUMBER / RANK / DENSE_RANK) are done. `mvn clean install` →
-**BUILD SUCCESS, 185 tests** (4 rpc + 66 core + 81 sql + 34 examples).
+runtime join-demote to broadcast), window functions
+(ROW_NUMBER / RANK / DENSE_RANK), and Spark-style memory management
+(UnifiedMemoryManager + TaskMemoryManager + spillable
+ExternalAppendOnlyMap + `-Xmx` enforcement) are done.
+`mvn clean install` → **BUILD SUCCESS, 200 tests**
+(4 rpc + 79 core + 83 sql + 34 examples).
 The codebase passed a high-effort code review (10 findings, all fixed).
 Every distributed use case has an integration test that spawns real
 executor JVMs.

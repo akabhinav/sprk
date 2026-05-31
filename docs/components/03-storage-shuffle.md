@@ -111,6 +111,51 @@ network — the same win over `groupByKey` that real Spark has.
 `HashPartitioner` (`hash(key) mod n`, MIN_VALUE-safe) and `RangePartitioner`
 (samples the data to build sorted range bounds; backs `sortByKey` / `ORDER BY`).
 
+## Memory management
+
+The executor's heap budget (`minispark.memory.store.maxBytes`, default 512 MB)
+is divided into two pools by `UnifiedMemoryManager`:
+
+```mermaid
+flowchart TB
+    subgraph Heap["UnifiedMemoryManager budget"]
+        direction LR
+        SP["StorageMemoryPool\n(RDD cache, broadcasts)"]
+        EP["ExecutionMemoryPool\n(shuffle, agg, sort)"]
+        SP <-->|"borrow free // reclaim above floor"| EP
+    end
+    MS["MemoryStore (LRU)"] -.-> SP
+    BM["NetworkBlockManager"] --> MS
+    TMM["TaskMemoryManager (per task)"] -.-> EP
+    AOM["ExternalAppendOnlyMap\n(MemoryConsumer)"] -.-> TMM
+```
+
+- **StorageMemoryPool** — `MemoryStore` calls `acquireStorageMemory` on
+  `putBlock` and `releaseStorageMemory` on eviction. Borrows free bytes
+  from the execution pool when the cache fills past its initial fraction.
+- **ExecutionMemoryPool** — `TaskMemoryManager` per task; fair-share cap of
+  `poolSize / numActiveTasks` so one fat group can't starve siblings.
+  Asks peer `MemoryConsumer`s to spill when the pool is full. May reclaim
+  storage bytes down to the `storageFraction` floor by evicting LRU cache.
+- **ExternalAppendOnlyMap** — the spillable hash used by
+  `PairRDDFunctions.combine` (and therefore every `reduceByKey` /
+  `HashAggregateExec`). When `acquireExecutionMemory` returns less than
+  asked, it dumps its in-memory state to a `BlockId.SpillBlock` on disk,
+  resets, and continues. `iterator()` merges in-memory entries with all
+  spill files by hash-bucket, combining same-key values. The single most
+  impactful Spark feature for surviving wide group-by queries on
+  constrained heaps. Real Spark equivalent:
+  `org.apache.spark.util.collection.ExternalAppendOnlyMap`.
+
+JVM heap enforcement: `ProcessExecutorLauncher` and `YarnExecutorLauncher`
+now pass `-Xmx{memoryMB}m` to the spawned executor JVM, so the configured
+budget is real, not advisory. The YARN launcher reserves the larger of
+384 MB or 10% of the container as `memoryOverhead`.
+
+Not yet implemented: spillable shuffle writers
+(`org.apache.spark.shuffle.sort.ExternalSorter`) and off-heap Tungsten
+unsafe rows.
+
 ## Broadcast variables
 
 `sc.broadcast(value)` writes the value into the driver's BlockManager once; the
@@ -126,5 +171,8 @@ once per executor, not once per task.
 | Block identity | `storage/BlockId.java` |
 | Map-output registry | `storage/MapOutputTracker.java` |
 | Hash / sort shuffle | `shuffle/HashShuffleManager.java`, `SortShuffleManager.java` |
+| Memory pools | `memory/MemoryPool.java`, `StorageMemoryPool.java`, `ExecutionMemoryPool.java` |
+| Unified manager + task accounting | `memory/UnifiedMemoryManager.java`, `TaskMemoryManager.java` |
+| Spillable hash (aggregation) | `memory/ExternalAppendOnlyMap.java`, `MemoryConsumer.java` |
 | Partitioning | `shuffle/HashPartitioner.java`, `RangePartitioner.java` |
 | Broadcast | `broadcast/TorrentBroadcast.java` |

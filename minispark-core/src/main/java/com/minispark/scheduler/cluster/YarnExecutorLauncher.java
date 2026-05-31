@@ -70,6 +70,18 @@ public final class YarnExecutorLauncher implements ExecutorLauncher {
         String classpath = System.getProperty("java.class.path");
         List<String> command = new ArrayList<>();
         command.add(javaBin);
+        // Enforce the requested executor memory at the JVM level. The container
+        // ask carries the same number; without -Xmx the actual heap was the
+        // platform default, making memoryMBPerExecutor advisory. With -Xmx the
+        // budget is real — the JVM OOMs at the configured size, not at whatever
+        // happens to fit on the host. Reserve a small overhead for native /
+        // direct memory (mirrors Spark's spark.executor.memoryOverhead split,
+        // which defaults to max(384, 0.1 * executorMemory)).
+        if (memoryMBPerExecutor > 0) {
+            long overhead = Math.max(384, (long) (memoryMBPerExecutor * 0.10));
+            long heap = Math.max(64, memoryMBPerExecutor - overhead);
+            command.add("-Xmx" + heap + "m");
+        }
         command.add("-cp"); command.add(classpath);
         // Forward configured system properties (e.g. shuffle manager) to the container JVM.
         systemProps.forEach((k, v) -> command.add("-D" + k + "=" + v));

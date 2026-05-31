@@ -39,8 +39,24 @@ public final class MemoryStore {
     private long usedBytes;
     // accessOrder=true → iteration order is LRU-first, which is what we evict.
     private final LinkedHashMap<BlockId, Entry> entries = new LinkedHashMap<>(16, 0.75f, true);
+    // Callbacks the StorageMemoryPool wires in. {@code onAcquire} fires for
+    // every byte added; {@code onRelease} for every byte dropped (by put-driven
+    // eviction, by execution-pool reclaim, or by explicit {@link #remove}).
+    // Net effect: the pool's memoryUsed mirrors {@link #usedBytes}.
+    private java.util.function.LongConsumer onRelease = bytes -> {};
+    private java.util.function.LongConsumer onAcquire = bytes -> {};
 
     public MemoryStore(long maxBytes) { this.maxBytes = maxBytes; }
+
+    /** Set once at startup so the StorageMemoryPool tracks our evictions. */
+    public synchronized void setOnReleaseCallback(java.util.function.LongConsumer cb) {
+        this.onRelease = cb == null ? bytes -> {} : cb;
+    }
+
+    /** Set once at startup so the StorageMemoryPool tracks our acquisitions. */
+    public synchronized void setOnAcquireCallback(java.util.function.LongConsumer cb) {
+        this.onAcquire = cb == null ? bytes -> {} : cb;
+    }
 
     public synchronized long maxBytes() { return maxBytes; }
     public synchronized long usedBytes() { return usedBytes; }
@@ -67,11 +83,13 @@ public final class MemoryStore {
             }
             Entry v = entries.remove(victim);
             usedBytes -= v.data.length;
+            onRelease.accept(v.data.length);
             evicted.add(new Evicted(victim, v.data, v.level));
             LOG.debug("Evicted {} ({} bytes) to free memory", victim, v.data.length);
         }
         entries.put(id, new Entry(data, level, evictable));
         usedBytes += data.length;
+        onAcquire.accept(data.length);
         return evicted;
     }
 
@@ -92,6 +110,34 @@ public final class MemoryStore {
 
     public synchronized void remove(BlockId id) {
         Entry e = entries.remove(id);
-        if (e != null) usedBytes -= e.data.length;
+        if (e != null) {
+            usedBytes -= e.data.length;
+            onRelease.accept(e.data.length);
+        }
+    }
+
+    /**
+     * Asked by the storage pool when the execution side needs more memory.
+     * Evicts LRU evictable blocks up to {@code bytes} and returns the actual
+     * number of bytes released. Pinned blocks (shuffle/broadcast) are never
+     * evicted by this path — the execution side just sees less reclaimable
+     * memory in that case. Eviction here is fire-and-forget: blocks are
+     * dropped outright, not handed to the disk store, since the caller
+     * (execution pool reclaim) doesn't know each block's StorageLevel and
+     * the cost of double-spilling outweighs the benefit. {@code put}-driven
+     * eviction still goes through the MEMORY_AND_DISK spill path.
+     */
+    public synchronized long evictBytesUpTo(long bytes) {
+        long freed = 0;
+        while (freed < bytes) {
+            BlockId victim = firstEvictable();
+            if (victim == null) break;
+            Entry v = entries.remove(victim);
+            usedBytes -= v.data.length;
+            freed += v.data.length;
+            LOG.debug("Eviction-on-demand dropped {} ({} bytes)", victim, v.data.length);
+        }
+        onRelease.accept(freed);
+        return freed;
     }
 }

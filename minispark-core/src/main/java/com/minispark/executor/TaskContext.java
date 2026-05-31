@@ -1,6 +1,7 @@
 package com.minispark.executor;
 
 import com.minispark.accumulator.AccumulatorParam;
+import com.minispark.memory.TaskMemoryManager;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -31,6 +32,9 @@ public final class TaskContext {
     private final int attemptNumber;
     // Accumulator deltas accumulated during this task, by accumulator id.
     private final Map<Long, AccumulatorDelta> accumulatorDeltas = new HashMap<>();
+    // Optional per-task memory manager. Set by the Executor around the task body
+    // when the SparkEnv is wired with a UnifiedMemoryManager; null otherwise.
+    private TaskMemoryManager taskMemoryManager;
 
     public TaskContext(int stageId, int partitionId, int attemptNumber) {
         this.stageId = stageId;
@@ -41,6 +45,11 @@ public final class TaskContext {
     public int stageId() { return stageId; }
     public int partitionId() { return partitionId; }
     public int attemptNumber() { return attemptNumber; }
+
+    /** Set once by the Executor before running the task body. */
+    public void setTaskMemoryManager(TaskMemoryManager tmm) { this.taskMemoryManager = tmm; }
+    /** May be {@code null} in setups without a UnifiedMemoryManager (legacy / unit tests). */
+    public TaskMemoryManager taskMemoryManager() { return taskMemoryManager; }
 
     /** Called from {@code Accumulator.add}. Threaded through {@link #accumulatorUpdates}. */
     public <T> void recordAccumulatorUpdate(long accumulatorId, AccumulatorParam<T> param, T delta) {

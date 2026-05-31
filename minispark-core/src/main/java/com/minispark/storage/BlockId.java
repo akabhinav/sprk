@@ -17,7 +17,7 @@ import java.util.Objects;
  * Real Spark equivalent: org.apache.spark.storage.BlockId
  */
 public abstract sealed class BlockId implements Serializable
-        permits BlockId.ShuffleBlock, BlockId.ShuffleDataBlock, BlockId.RDDBlock, BlockId.BroadcastBlock {
+        permits BlockId.ShuffleBlock, BlockId.ShuffleDataBlock, BlockId.RDDBlock, BlockId.BroadcastBlock, BlockId.SpillBlock {
 
     public abstract String name();
 
@@ -80,6 +80,29 @@ public abstract sealed class BlockId implements Serializable
             return o instanceof RDDBlock b && b.rddId == rddId && b.partitionIndex == partitionIndex;
         }
         @Override public int hashCode() { return Objects.hash(rddId, partitionIndex); }
+    }
+
+    /**
+     * {@code spill_<taskId>_<seq>} — a chunk dumped from an
+     * {@link com.minispark.memory.ExternalAppendOnlyMap} (or similar
+     * spillable consumer) when execution memory runs out. Always stored on
+     * disk; never replicated; the consumer reads it back during merge.
+     */
+    public static final class SpillBlock extends BlockId {
+        public final long taskAttemptId;
+        public final int sequence;
+
+        public SpillBlock(long taskAttemptId, int sequence) {
+            this.taskAttemptId = taskAttemptId;
+            this.sequence = sequence;
+        }
+
+        @Override public String name() { return "spill_" + taskAttemptId + "_" + sequence; }
+
+        @Override public boolean equals(Object o) {
+            return o instanceof SpillBlock b && b.taskAttemptId == taskAttemptId && b.sequence == sequence;
+        }
+        @Override public int hashCode() { return Objects.hash(taskAttemptId, sequence); }
     }
 
     /** {@code broadcast_<broadcastId>}. */

@@ -1,5 +1,6 @@
 package com.minispark.executor;
 
+import com.minispark.memory.UnifiedMemoryManager;
 import com.minispark.serializer.Serializer;
 import com.minispark.shuffle.ShuffleManager;
 import com.minispark.storage.BlockManager;
@@ -38,19 +39,31 @@ public final class SparkEnv {
     private final BlockManager blockManager;
     private final MapOutputTracker mapOutputTracker;
     private final Serializer serializer;
+    private final UnifiedMemoryManager memoryManager;
 
     public SparkEnv(ShuffleManager shuffleManager,
                     BlockManager blockManager,
                     MapOutputTracker mapOutputTracker,
                     Serializer serializer) {
+        this(shuffleManager, blockManager, mapOutputTracker, serializer, null);
+    }
+
+    public SparkEnv(ShuffleManager shuffleManager,
+                    BlockManager blockManager,
+                    MapOutputTracker mapOutputTracker,
+                    Serializer serializer,
+                    UnifiedMemoryManager memoryManager) {
         this.shuffleManager = shuffleManager;
         this.blockManager = blockManager;
         this.mapOutputTracker = mapOutputTracker;
         this.serializer = serializer;
+        this.memoryManager = memoryManager;
     }
 
     public ShuffleManager shuffleManager() { return shuffleManager; }
     public BlockManager blockManager() { return blockManager; }
     public MapOutputTracker mapOutputTracker() { return mapOutputTracker; }
     public Serializer serializer() { return serializer; }
+    /** May be {@code null} in legacy / test setups that didn't wire one. */
+    public UnifiedMemoryManager memoryManager() { return memoryManager; }
 }

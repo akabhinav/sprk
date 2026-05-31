@@ -1,5 +1,7 @@
 package com.minispark.executor;
 
+import com.minispark.memory.TaskMemoryManager;
+import com.minispark.memory.UnifiedMemoryManager;
 import com.minispark.scheduler.Task;
 import com.minispark.serializer.Serializer;
 import org.slf4j.Logger;
@@ -55,6 +57,12 @@ public final class Executor {
         pool.submit(() -> {
             int attempt = ATTEMPT.incrementAndGet();
             TaskContext ctx = new TaskContext(stageId, partitionId, attempt);
+            // Hand the task a per-attempt TaskMemoryManager so MemoryConsumers
+            // (ExternalAppendOnlyMap, future spillable shuffle writers) can
+            // acquire/release execution memory and be asked to spill.
+            UnifiedMemoryManager umm = SparkEnv.get().memoryManager();
+            TaskMemoryManager tmm = (umm == null) ? null : new TaskMemoryManager(umm, attempt);
+            ctx.setTaskMemoryManager(tmm);
             // Make ctx discoverable by Accumulator.add and any code that wants
             // task scope without an explicit parameter.
             TaskContext.setCurrent(ctx);
@@ -67,6 +75,9 @@ public final class Executor {
                 LOG.warn("Task {} failed: {}", ctx, t.toString());
                 onFailure.accept(ctx, t);
             } finally {
+                // Release any execution memory the task forgot to release. Real
+                // Spark logs a leak warning when this is non-zero; we just drain.
+                if (tmm != null) tmm.releaseAllForTask();
                 TaskContext.unset();
             }
         });

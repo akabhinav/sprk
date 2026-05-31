@@ -578,6 +578,9 @@ the same path you traced here.
 | window functions | `sql.expr.window.{WindowFunction, RankingFunctions, WindowSpec, WindowExpression}` | `catalyst.expressions.{WindowFunction, RowNumber/Rank/DenseRank, WindowSpec, WindowExpression}` |
 | Window logical/physical | `sql.plan.Window` / `sql.execution.WindowExec` | same |
 | Window builder | `sql.Window` (static factory) | `sql.expressions.Window` |
+| Unified memory manager | `memory.UnifiedMemoryManager` + `{Storage,Execution}MemoryPool` | `memory.UnifiedMemoryManager` |
+| Per-task memory + spill | `memory.TaskMemoryManager` + `MemoryConsumer` | `memory.TaskMemoryManager` |
+| Spillable aggregation map | `memory.ExternalAppendOnlyMap` | `util.collection.ExternalAppendOnlyMap` |
 | task dispatcher | `scheduler.TaskScheduler` | `TaskSchedulerImpl` + `TaskSetManager` |
 | backend | `cluster.CoarseGrainedSchedulerBackend` | same |
 | executor backend | `cluster.CoarseGrainedExecutorBackend` | same |

@@ -1,5 +1,6 @@
 package com.minispark.storage;
 
+import com.minispark.memory.UnifiedMemoryManager;
 import com.minispark.rpc.RpcEndpoint;
 import com.minispark.rpc.RpcEnv;
 import org.slf4j.Logger;
@@ -40,6 +41,11 @@ public final class NetworkBlockManager implements BlockManager, RpcEndpoint {
     private final RpcEnv rpcEnv;
     private final MemoryStore memoryStore;
     private final DiskStore diskStore;
+    // Optional: set after construction by MiniSparkContext / executor backend.
+    // When null, behaves like before — the memory budget is enforced by MemoryStore
+    // alone and there's no pool-side accounting. When set, the pool drives
+    // MemoryStore evictions on behalf of execution-memory acquisitions.
+    private UnifiedMemoryManager memoryManager;
 
     public NetworkBlockManager(ExecutorLocation location, RpcEnv rpcEnv) {
         this(location, rpcEnv, 512L * 1024 * 1024, null);
@@ -55,6 +61,22 @@ public final class NetworkBlockManager implements BlockManager, RpcEndpoint {
     }
 
     @Override public ExecutorLocation location() { return location; }
+
+    /**
+     * Wire in the unified memory manager. The storage pool's MemoryStore
+     * reference is set so execution-pool reclaim can drive evictions, and
+     * the MemoryStore's release callback feeds usage tracking back into
+     * the pool. Optional — when not called, the block manager behaves
+     * exactly as before (legacy single-cap mode).
+     */
+    public void setUnifiedMemoryManager(UnifiedMemoryManager mm) {
+        this.memoryManager = mm;
+        mm.setMemoryStore(memoryStore);
+        memoryStore.setOnAcquireCallback(bytes -> mm.storagePool().incrementUsedDirectly(bytes));
+        memoryStore.setOnReleaseCallback(bytes -> mm.releaseStorageMemory(bytes));
+    }
+
+    public UnifiedMemoryManager memoryManager() { return memoryManager; }
 
     /** Default: pinned in memory (shuffle/broadcast). Falls back to disk if huge. */
     @Override

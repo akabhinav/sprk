@@ -258,6 +258,21 @@ Three runtime AQE rules:
 
 All three leave query semantics unchanged when their preconditions hold; only the physical strategy is rewritten. Mirrors Spark's `spark.sql.adaptive.*` key names.
 
+### Memory management
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `minispark.executor.memoryMB` | `512` | Per-executor JVM heap target. Passed as `-Xmx{n}m` to spawned executor JVMs (ProcessExecutorLauncher / YarnExecutorLauncher) so the budget is *enforced*, not just an ask. YARN launcher reserves the larger of 384 MB or 10% as overhead (mirrors `spark.executor.memoryOverhead`). |
+| `minispark.memory.store.maxBytes` | `536870912` (512 MiB) | Total unified memory budget per executor, split into storage + execution pools. Bytes-with-suffix supported (e.g. `4096`, `8k`, `64m`). |
+| `minispark.memory.storageFraction` | `0.5` | Fraction reserved for the storage pool (cache + broadcast); execution gets the rest. The floor — storage can't be shrunk below this by execution reclaim. |
+
+The executor's `UnifiedMemoryManager` splits the budget into two pools with a movable boundary:
+
+- **StorageMemoryPool** — tracked via `MemoryStore`. Caching a block calls `acquireStorageMemory`; eviction (LRU or on-demand) calls `releaseStorageMemory`. May *borrow* free bytes from the execution pool.
+- **ExecutionMemoryPool** — per-task accounting via `TaskMemoryManager`. Fair-share cap of `poolSize / numActiveTasks`. When a task can't get more bytes, peer `MemoryConsumer`s (e.g. spillable structures) are asked to spill. May *reclaim* bytes from storage by evicting LRU cache down to the `storageFraction` floor.
+- **MemoryConsumer / ExternalAppendOnlyMap** — `PairRDDFunctions.combine` (used by `reduceByKey` and therefore `HashAggregateExec`) now feeds rows into an `ExternalAppendOnlyMap` that **spills to disk** when execution memory is exhausted. Wide group-by queries that previously OOMed now finish — slower, but they finish. Spill files are `BlockId.SpillBlock`s stored DISK_ONLY.
+
+Not yet implemented: spillable shuffle writers (`ExternalSorter`), off-heap Tungsten unsafe rows.
+
 ### Join planner
 | Key | Default | Meaning |
 |-----|---------|---------|

@@ -56,16 +56,38 @@ public final class PairRDDFunctions<K, V> {
                 (ctx, part, it) -> combine(it, reducer));
     }
 
+    /**
+     * Map-side combine for {@code reduceByKey}-style operations. Goes through
+     * {@link com.minispark.memory.ExternalAppendOnlyMap} so the hash table
+     * spills to disk when execution memory runs out, instead of OOMing — the
+     * single most common cause of OOMs on wide groups in real Spark, now
+     * survivable here too.
+     *
+     * <p>Falls back to a plain in-memory {@link HashMap} when the executor
+     * doesn't have a {@link com.minispark.memory.TaskMemoryManager} wired in
+     * (e.g. legacy unit-test SparkEnv) — same behaviour as before that path.
+     */
     private static <K, V> Iterator<Tuple2<K, V>> combine(Iterator<Tuple2<K, V>> in,
                                                          RDD.SerializableBiFunction<V, V, V> reducer) {
-        Map<K, V> acc = new HashMap<>();
+        com.minispark.executor.TaskContext ctx = com.minispark.executor.TaskContext.get();
+        com.minispark.memory.TaskMemoryManager tmm = (ctx == null) ? null : ctx.taskMemoryManager();
+        if (tmm == null) {
+            // Legacy / test path.
+            Map<K, V> acc = new HashMap<>();
+            while (in.hasNext()) {
+                Tuple2<K, V> kv = in.next();
+                acc.merge(kv._1(), kv._2(), reducer);
+            }
+            return acc.entrySet().stream().map(e -> new Tuple2<>(e.getKey(), e.getValue())).iterator();
+        }
+        com.minispark.memory.ExternalAppendOnlyMap<K, V> map =
+                new com.minispark.memory.ExternalAppendOnlyMap<>(
+                        tmm, reducer, com.minispark.executor.SparkEnv.get().blockManager());
         while (in.hasNext()) {
             Tuple2<K, V> kv = in.next();
-            acc.merge(kv._1(), kv._2(), reducer);
+            map.insert(kv._1(), kv._2());
         }
-        return acc.entrySet().stream()
-                .map(e -> new Tuple2<>(e.getKey(), e.getValue()))
-                .iterator();
+        return map.iterator();
     }
 
     private Partitioner defaultPartitioner() {

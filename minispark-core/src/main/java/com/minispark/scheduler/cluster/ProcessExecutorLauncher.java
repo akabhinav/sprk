@@ -28,6 +28,7 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
 
     private final int numExecutors;
     private final int coresPerExecutor;
+    private final int executorMemoryMB;
     /** System properties forwarded to each child JVM (e.g. shuffle manager choice). */
     private final java.util.Map<String, String> systemProps;
     private final java.util.Map<String, Process> byId = new java.util.concurrent.ConcurrentHashMap<>();
@@ -38,8 +39,14 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
 
     public ProcessExecutorLauncher(int numExecutors, int coresPerExecutor,
                                    java.util.Map<String, String> systemProps) {
+        this(numExecutors, coresPerExecutor, 0, systemProps);
+    }
+
+    public ProcessExecutorLauncher(int numExecutors, int coresPerExecutor, int executorMemoryMB,
+                                   java.util.Map<String, String> systemProps) {
         this.numExecutors = numExecutors;
         this.coresPerExecutor = coresPerExecutor;
+        this.executorMemoryMB = executorMemoryMB;
         this.systemProps = systemProps;
     }
 
@@ -75,6 +82,12 @@ public final class ProcessExecutorLauncher implements ExecutorLauncher {
         String classpath = System.getProperty("java.class.path");
         List<String> cmd = new ArrayList<>();
         cmd.add(javaBin);
+        // Enforce the configured executor memory budget at the JVM level. Without
+        // this, executorMemoryMB was advisory: the cluster manager sized the
+        // container by it but the JVM heap was the platform default. -Xmx makes
+        // it real; OOMs now happen at the configured budget instead of whenever
+        // the JVM happens to grow.
+        if (executorMemoryMB > 0) cmd.add("-Xmx" + executorMemoryMB + "m");
         cmd.add("-cp"); cmd.add(classpath);
         // Forward configured system properties (e.g. shuffle manager) so the
         // child builds a SparkEnv compatible with the driver's.
