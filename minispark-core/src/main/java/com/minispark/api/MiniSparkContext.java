@@ -158,6 +158,12 @@ public final class MiniSparkContext implements AutoCloseable {
         executorProps.put("minispark.memory.store.maxBytes", String.valueOf(maxMem));
         executorProps.put("minispark.memory.storageFraction", String.valueOf(storageFraction));
         if (localDir != null) executorProps.put("minispark.local.dir", localDir);
+        // Optional explicit advertise-host for executor JVMs (Spark's SPARK_LOCAL_IP).
+        // Usually left unset — each executor auto-detects its own routable IP — but
+        // forwardable so a single-host run can pin loopback, or a deployment can
+        // override per the multinode runbook.
+        conf.getOption("minispark.executor.host")
+                .ifPresent(h -> executorProps.put("minispark.executor.host", h));
 
         ExecutorLauncher launcher0;
         int totalCores;

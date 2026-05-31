@@ -210,9 +210,21 @@ on the submit line with `--conf`.
 - **Web UI** (optional): add `--conf minispark.ui.enabled=true --conf minispark.ui.host=10.0.0.1 --conf minispark.ui.port=4040`
   and browse `http://10.0.0.1:4040/` for live executors/jobs/stages.
 
-A permanent automated proof of this exact chain (RM + 2 NMs + submit) runs in
-`SubmitMiniYarnTest` (single-host, ports bound per-component) — the multinode
-case is the same wiring with routable IPs instead of loopback.
+Two automated proofs back this up:
+
+- `SubmitMiniYarnTest` — the `minispark-submit` → RM + 2 NMs → executors chain.
+- `MultiNodeClusterTest` — the **routable-IP** proof. It binds the RM, both
+  NodeManagers, the driver and the executors to this host's routable
+  (non-loopback) IP — not `127.0.0.1` — then re-runs the full feature battery
+  (RDD shuffles, cache/broadcast/accumulator, sort shuffle, AQE coalesce/skew,
+  spillable aggregation, and the whole SQL/join surface) and asserts both the
+  results and that executors advertised the routable IP. That exercises the
+  exact cross-host wiring this runbook describes; the only thing it can't
+  reproduce in one container is physical machine separation and firewalls
+  (environmental, not code). The "advertise a routable IP, never 127.0.0.1"
+  rule at the top of this doc is enforced in code by the executor resolving a
+  routable NIC (Spark's `Utils.findLocalInetAddress` behaviour), overridable
+  with `minispark.executor.host`.
 
 ---
 

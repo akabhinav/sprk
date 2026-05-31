@@ -103,6 +103,15 @@ public final class YarnExecutorLauncher implements ExecutorLauncher {
 
     @Override
     public void stop() {
-        if (am != null) am.unregister("SUCCEEDED");
+        // Best-effort: tell the RM the app is done so it can reclaim containers.
+        // During shutdown the RPC channel may already be torn down — a failed
+        // write here must not propagate out of MiniSparkContext.close().
+        if (am != null) {
+            try {
+                am.unregister("SUCCEEDED");
+            } catch (RuntimeException e) {
+                LOG.debug("AM unregister during shutdown failed (ignored): {}", e.toString());
+            }
+        }
     }
 }

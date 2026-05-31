@@ -189,9 +189,38 @@ public final class CoarseGrainedExecutorBackend implements RpcEndpoint {
         rpcEnv.awaitTermination();
     }
 
+    /**
+     * The address this executor binds and <b>advertises to the driver and to
+     * peer executors</b>. On a multi-node cluster this must be a routable IP —
+     * a loopback address would make the executor's shuffle blocks unreachable
+     * from other hosts (a reducer on another node would dial 127.0.0.1 and hit
+     * itself). Resolution order, mirroring Spark's {@code Utils.findLocalInetAddress}:
+     * <ol>
+     *   <li>explicit {@code -Dminispark.executor.host} (Spark's {@code SPARK_LOCAL_IP});</li>
+     *   <li>{@code getLocalHost()} if it resolves to a non-loopback address;</li>
+     *   <li>otherwise the first routable (up, non-loopback, non-link-local)
+     *       IPv4 found by scanning the network interfaces — the case that
+     *       saves a box whose hostname maps to 127.0.0.1 in {@code /etc/hosts};</li>
+     *   <li>loopback as a last resort.</li>
+     * </ol>
+     */
     private static String hostname() {
+        String override = System.getProperty("minispark.executor.host");
+        if (override != null && !override.isBlank()) return override;
         try {
-            return java.net.InetAddress.getLocalHost().getHostAddress();
+            java.net.InetAddress local = java.net.InetAddress.getLocalHost();
+            if (!local.isLoopbackAddress()) return local.getHostAddress();
+            for (java.net.NetworkInterface ni :
+                    java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (java.net.InetAddress a : java.util.Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof java.net.Inet4Address
+                            && !a.isLoopbackAddress() && !a.isLinkLocalAddress()) {
+                        return a.getHostAddress();
+                    }
+                }
+            }
+            return local.getHostAddress();
         } catch (Exception e) {
             return "127.0.0.1";
         }

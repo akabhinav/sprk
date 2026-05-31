@@ -174,13 +174,25 @@ partition coalesce, skew-partition split, runtime join-demote to
 broadcast), window functions (ROW_NUMBER / RANK / DENSE_RANK), and
 Spark-style memory management (UnifiedMemoryManager + TaskMemoryManager +
 spillable ExternalAppendOnlyMap + `-Xmx` enforcement) are done.
-`mvn clean install` → **BUILD SUCCESS, 232 tests**
-(4 rpc + 79 core + 90 sql + 59 examples). Every feature has an end-to-end
+`mvn clean install` → **BUILD SUCCESS, 239 tests**
+(4 rpc + 79 core + 90 sql + 66 examples). Every feature has an end-to-end
 example that runs across a driver + 2 executor JVMs over TCP — 44 worked
 distributed examples in `minispark-examples/.../dist/` (data-plane ops, SQL,
 AQE, window functions, all join strategies, memory/spill, plus control-plane:
 dynamic allocation, speculation, and the MiniYarn cluster manager). See the
 [example gallery](docs/RUNBOOK.md#distributed-example-gallery-44-worked-examples).
+
+**Multi-node proof.** `MultiNodeClusterTest` re-runs the full feature battery
+(RDD ops + shuffles, cache/broadcast/accumulator, sort shuffle, AQE
+coalesce/skew, spillable aggregation, and the whole SQL surface incl. all join
+strategies) against a real MiniYarn cluster — RM + 2 NodeManagers + driver —
+with **every component bound to and advertising this host's routable
+(non-loopback) IP**, so executor JVMs dial back and fetch shuffle blocks over
+the routable interface exactly as a cluster spanning separate machines would.
+It also asserts executors advertise the routable IP, not loopback. (Surfacing
+this exposed and fixed a real bug: executors used `getLocalHost()`, which
+returns loopback when the hostname maps to `127.0.0.1` — they now resolve a
+routable NIC like Spark's `Utils.findLocalInetAddress`.)
 The codebase passed a high-effort code review (10 findings, all fixed).
 Every distributed use case has an integration test that spawns real
 executor JVMs.
