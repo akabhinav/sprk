@@ -1,0 +1,43 @@
+# A multi-node MiniSpark cluster in containers: a ResourceManager, two
+# NodeManagers, and a one-shot submit client — each its own container with its
+# own hostname/IP on the user-defined network `msnet`. Executors are spawned by
+# the NodeManagers inside their containers and advertise their container IP, so
+# RPC, shuffle-fetch and broadcast all cross real container-to-container TCP.
+#
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml up -d rm nm1 nm2
+#   docker compose -f docker/docker-compose.yml run --rm submit
+services:
+  rm:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    image: minispark:latest
+    hostname: rm
+    command: ["rm", "rm", "8032"]
+    networks: [msnet]
+  nm1:
+    image: minispark:latest
+    hostname: nm1
+    command: ["nm", "nm1", "rm", "8032", "nm1", "8041", "2", "1024"]
+    depends_on: [rm]
+    networks: [msnet]
+  nm2:
+    image: minispark:latest
+    hostname: nm2
+    command: ["nm", "nm2", "rm", "8032", "nm2", "8041", "2", "1024"]
+    depends_on: [rm]
+    networks: [msnet]
+  submit:
+    image: minispark:latest
+    hostname: driver
+    # WordCount via the spark-submit equivalent, across the cluster.
+    command: ["submit",
+              "--class", "com.minispark.examples.WordCount",
+              "--master", "miniyarn://rm:8032",
+              "--num-executors", "2", "--executor-cores", "2", "--executor-memory", "256",
+              "--conf", "minispark.driver.host=driver",
+              "/src/minispark-examples/src/test/resources/book.txt"]
+    depends_on: [rm, nm1, nm2]
+    networks: [msnet]
+networks:
+  msnet:
+    driver: bridge
