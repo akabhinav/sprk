@@ -22,12 +22,27 @@ flowchart LR
   current job/stage/executor state and hands out **immutable snapshots**, so the
   UI thread never races the dispatch thread.
 - **`MiniSparkUI`** — the JDK's built-in `com.sun.net.httpserver.HttpServer`
-  (zero deps) serves one self-refreshing HTML page: Executors, Jobs, Stages
-  (with progress bars).
+  (zero deps) serves two self-refreshing pages:
+  - **`/`** — Executors, Jobs, Stages (with progress bars).
+  - **`/dag`** — the stage DAG, one diagram per job, as inline SVG (no JS/CDN,
+    works offline). Nodes are stages (id · type · task progress, coloured by
+    status); arrows are shuffle boundaries (parent → child). Laid out
+    left-to-right by dependency level — the shuffle-producing parents on the
+    left, the `ResultStage` on the right.
 
 The UI reads only the store, so it can neither perturb nor be perturbed by
 scheduling — exactly Spark's `AppStatusListener`/`AppStatusStore`/`SparkUI`
 split.
+
+### How the DAG edges reach the UI
+
+A `Stage` knows its `parents()` while the job runs, but that's gone once the
+job ends. So `StageSubmitted` now carries `parentStageIds`, the
+`AppStatusStore` records them on each `StageView`, and `/dag` draws the graph
+from those edges. The scheduler stores the *full ancestor set* as a stage's
+parents (a scheduling convenience), so the UI applies a **transitive
+reduction** — it draws only immediate edges, dropping `A→C` when a path
+`A→B→C` already exists — to match how Spark renders the DAG.
 
 ## Enabling it
 

@@ -200,6 +200,13 @@ public final class DAGScheduler {
     private void post(SchedulerEvent e) { if (listenerBus != null) listenerBus.post(e); }
     private static long now() { return System.currentTimeMillis(); }
 
+    /** Ids of {@code stage}'s parent stages — the edges the UI draws the DAG from. */
+    private static List<Integer> parentStageIds(Stage stage) {
+        List<Integer> ids = new ArrayList<>(stage.parents().size());
+        for (Stage p : stage.parents()) ids.add(p.id());
+        return ids;
+    }
+
     /** DFS the RDD lineage, registering a ShuffleMapStage for each ShuffleDependency seen. */
     private void discoverShuffleAncestors(RDD<?> rdd,
                                           List<ShuffleMapStage> out,
@@ -255,7 +262,8 @@ public final class DAGScheduler {
             liveTasks.put(taskKey(stage.id(), p.index()), t);
         }
         LOG.info("Submitting ShuffleMapStage {}: {} map tasks", stage.id(), tasks.size());
-        post(new SchedulerEvent.StageSubmitted(stage.id(), "ShuffleMapStage", tasks.size(), now()));
+        post(new SchedulerEvent.StageSubmitted(stage.id(), "ShuffleMapStage", tasks.size(),
+                parentStageIds(stage), now()));
         int shuffleId = stage.shuffleDep().shuffleId();
         List<TaskResult<?>> results;
         try {
@@ -410,7 +418,8 @@ public final class DAGScheduler {
             liveTasks.put(taskKey(stage.id(), pIdx), t);
         }
         LOG.info("Submitting ResultStage {}: {} result tasks", stage.id(), tasks.size());
-        post(new SchedulerEvent.StageSubmitted(stage.id(), "ResultStage", tasks.size(), now()));
+        post(new SchedulerEvent.StageSubmitted(stage.id(), "ResultStage", tasks.size(),
+                parentStageIds(stage), now()));
 
         List<TaskResult<?>> results;
         try {

@@ -17,7 +17,8 @@ public sealed interface SchedulerEvent {
     record JobStart(int jobId, java.util.List<Integer> stageIds, long timeMs) implements SchedulerEvent {}
     record JobEnd(int jobId, boolean success, long timeMs) implements SchedulerEvent {}
 
-    record StageSubmitted(int stageId, String name, int numTasks, long timeMs) implements SchedulerEvent {}
+    record StageSubmitted(int stageId, String name, int numTasks,
+                          java.util.List<Integer> parentStageIds, long timeMs) implements SchedulerEvent {}
     record StageCompleted(int stageId, boolean success, long timeMs) implements SchedulerEvent {}
 
     record TaskStart(int stageId, int partitionId, String executorId, long timeMs) implements SchedulerEvent {}

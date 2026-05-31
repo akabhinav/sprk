@@ -20,15 +20,17 @@ public final class AppStatusStore implements SchedulerListener {
 
     public record JobView(int jobId, List<Integer> stageIds, Status status, long startMs, long endMs) {}
     public record StageView(int stageId, String name, int numTasks, int completedTasks,
-                            int failedTasks, Status status, long startMs, long endMs) {}
+                            int failedTasks, List<Integer> parentStageIds,
+                            Status status, long startMs, long endMs) {}
     public record ExecutorView(String executorId, String host, int port, int cores,
                                boolean active, int tasksRun) {}
 
     private static final class MutableStage {
-        final int stageId; final String name; final int numTasks;
+        final int stageId; final String name; final int numTasks; final List<Integer> parentStageIds;
         int completed; int failed; Status status; long start; long end;
-        MutableStage(int id, String name, int n, long start) {
+        MutableStage(int id, String name, int n, List<Integer> parents, long start) {
             this.stageId = id; this.name = name; this.numTasks = n;
+            this.parentStageIds = parents == null ? List.of() : parents;
             this.status = Status.RUNNING; this.start = start;
         }
     }
@@ -60,7 +62,8 @@ public final class AppStatusStore implements SchedulerListener {
                 if (j != null) { j.status = e.success() ? Status.SUCCEEDED : Status.FAILED; j.end = e.timeMs(); }
             }
             case SchedulerEvent.StageSubmitted e ->
-                    stages.put(e.stageId(), new MutableStage(e.stageId(), e.name(), e.numTasks(), e.timeMs()));
+                    stages.put(e.stageId(), new MutableStage(e.stageId(), e.name(), e.numTasks(),
+                            e.parentStageIds(), e.timeMs()));
             case SchedulerEvent.StageCompleted e -> {
                 MutableStage s = stages.get(e.stageId());
                 if (s != null) { s.status = e.success() ? Status.SUCCEEDED : Status.FAILED; s.end = e.timeMs(); }
@@ -97,7 +100,7 @@ public final class AppStatusStore implements SchedulerListener {
         List<StageView> out = new ArrayList<>();
         for (MutableStage s : sortedById(stages)) {
             out.add(new StageView(s.stageId, s.name, s.numTasks, s.completed, s.failed,
-                    s.status, s.start, s.end));
+                    s.parentStageIds, s.status, s.start, s.end));
         }
         return out;
     }
