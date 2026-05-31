@@ -300,15 +300,15 @@ mvn -pl minispark-sql      test -Dtest=SqlDistributedTest            # spark.sql
 They **abort (skip) gracefully** if the sandbox can't spawn child JVMs, rather
 than failing.
 
-### Distributed example gallery (41 worked examples)
+### Distributed example gallery (44 worked examples)
 
-`minispark-examples/.../dist/` holds 41 end-to-end examples covering **every**
+`minispark-examples/.../dist/` holds 44 end-to-end examples covering **every**
 feature, all run across a driver + 2 executor JVMs over TCP (shared harness:
 `DistTestSupport` — spins up the cluster on a watchdog thread and aborts
 cleanly if JVMs can't spawn).
 
 ```bash
-# all 41 at once
+# all 44 at once
 mvn -pl minispark-examples test -Dtest='*DistributedExamplesTest'
 ```
 
@@ -355,6 +355,9 @@ mvn -pl minispark-examples test -Dtest='*DistributedExamplesTest'
 | 39 | dynamic allocation | cluster grows past 1 executor under a backlog |
 | 40 | speculation | a straggler partition is speculatively re-launched |
 | 41 | MiniYarn cluster manager | RM + 2 NodeManagers; executors spread across both |
+| 42 | CROSS join | cartesian product (`CartesianProductExec`) |
+| 43 | non-equi range join | `a.x ∈ [b.lo, b.hi)` via `BroadcastNestedLoopJoinExec` |
+| 44 | LEFT SEMI join | existence test, left columns only |
 
 Run one group:
 ```bash

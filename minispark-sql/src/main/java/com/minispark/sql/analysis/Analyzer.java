@@ -83,7 +83,13 @@ public final class Analyzer {
             for (Expression e : j.leftKeys()) lk.add(bind(e, l));
             List<Expression> rk = new ArrayList<>();
             for (Expression e : j.rightKeys()) rk.add(bind(e, r));
-            return new com.minispark.sql.plan.Join(j.left(), j.right(), lk, rk, j.joinType());
+            // A non-equi condition spans both sides: bind it against the combined
+            // left++right layout the executor evaluates it on.
+            Expression cond = j.condition();
+            if (cond != null) {
+                cond = bind(cond, com.minispark.sql.plan.Join.combinedInputSchema(j.left(), j.right()));
+            }
+            return new com.minispark.sql.plan.Join(j.left(), j.right(), lk, rk, j.joinType(), cond);
         }
         if (withResolvedChildren instanceof com.minispark.sql.plan.Aggregate agg) {
             StructType in = agg.child().schema();

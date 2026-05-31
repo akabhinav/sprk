@@ -157,6 +157,30 @@ public final class DataFrame {
                 new com.minispark.sql.plan.Join(logicalPlan, right.logicalPlan, lk, rk, joinType));
     }
 
+    /**
+     * Cartesian product — every left row paired with every right row, no
+     * condition. Lowers to {@code CartesianProductExec}. Output cardinality is
+     * {@code |left| × |right|}, so use deliberately.
+     */
+    public DataFrame crossJoin(DataFrame right) {
+        return new DataFrame(session, new com.minispark.sql.plan.Join(
+                logicalPlan, right.logicalPlan, List.of(), List.of(),
+                com.minispark.sql.plan.JoinType.CROSS));
+    }
+
+    /**
+     * Non-equi join on an arbitrary boolean {@code condition} over both sides'
+     * columns (e.g. {@code left.col("x").gt(right.col("y"))}). With no equi-key
+     * to hash on this lowers to {@code BroadcastNestedLoopJoinExec}, which
+     * filters the cartesian pairs by the condition. Supports INNER/LEFT/RIGHT/
+     * LEFT_SEMI/LEFT_ANTI/CROSS (not FULL).
+     */
+    public DataFrame join(DataFrame right, Column condition,
+                          com.minispark.sql.plan.JoinType joinType) {
+        return new DataFrame(session, new com.minispark.sql.plan.Join(
+                logicalPlan, right.logicalPlan, List.of(), List.of(), joinType, condition.expr()));
+    }
+
     // ----- actions (eager) -----
 
     public List<Row> collect() {

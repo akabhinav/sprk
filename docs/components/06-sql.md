@@ -145,29 +145,50 @@ for the end-to-end trace.
 
 ### Join strategy selection
 
-The planner picks among three physical join operators:
+The planner (`SparkPlanner.planJoin`) picks among **five** physical join
+operators — the same set as real Spark. The first split is whether the join
+has an equi-key:
+
+**Equi-joins** (`leftKeys[i] == rightKeys[i]`):
 
 | Operator | When picked | Cost shape |
 |----------|-------------|------------|
 | `BroadcastHashJoinExec` | one side has a `df.broadcast()` hint, **or** one side is a `LocalRelation` under `minispark.sql.autoBroadcastJoinThreshold.rows` (default 1000) | small side collected to driver → one broadcast hop per executor; streaming side never shuffled |
 | `SortMergeJoinExec` | not broadcast-eligible, and `minispark.sql.join.preferSortMergeJoin=true` | both sides shuffled through the **same** partitioner, then zipped per partition; each partition sorts its two sides and merge-iterates |
-| `ShuffledHashJoinExec` | the default non-broadcast fallback, **and always for FULL OUTER when SMJ is off** | both sides bucketed by join key via a `CoGroupedRDD` shuffle; one in-memory hash table per key group |
+| `ShuffledHashJoinExec` | the default non-broadcast fallback, **always for FULL OUTER and for LEFT_SEMI/LEFT_ANTI** | both sides bucketed by join key via a `CoGroupedRDD` shuffle; one in-memory hash table per key group |
 
-Selection logic lives in `SparkPlanner.planJoin`. Broadcast wins over
-sort-merge wins over shuffled-hash, with the eligibility checks:
+**Non-equi / cross joins** (no equi-key):
+
+| Operator | When picked | Cost shape |
+|----------|-------------|------------|
+| `CartesianProductExec` | unconditional `CROSS` (or key-less INNER) with **no** predicate | right side broadcast; emits all `|L| × |R|` pairs |
+| `BroadcastNestedLoopJoinExec` | a non-equi `ON` predicate (`a.lo <= b.x < a.hi`), or CROSS-with-condition | one side broadcast; loops it per streaming row, filtering by the predicate. Supports INNER/LEFT/RIGHT/SEMI/ANTI (not FULL) |
+
+Eligibility notes:
 
 - The broadcast hint (`plan.BroadcastHint`) is a logical pass-through node
   that survives optimizer rewrites. Build-side eligibility per join type is
   enforced in `BroadcastHashJoinExec.{canBuildLeft, canBuildRight}` —
-  broadcasting the LEFT side is only safe for INNER and RIGHT joins
-  (a LEFT outer would need to know which build-side rows had no probe
-  match, which a map-only operator can't report). FULL OUTER never
-  broadcasts.
-- Sort-merge handles all four join types (INNER/LEFT/RIGHT/FULL) directly
-  in its merge loop. The "real Spark uses SMJ as the default" payoff is
-  the ability to stream sorted shuffle data without materialising a full
-  hash table per key group — in MiniSpark we still sort in memory, so the
-  benefit is pedagogical, not memory-real.
+  broadcasting the LEFT side is only safe for INNER and RIGHT joins. FULL
+  OUTER never broadcasts.
+- Sort-merge handles INNER/LEFT/RIGHT/FULL directly in its merge loop. The
+  "real Spark uses SMJ as the default" payoff is streaming sorted shuffle
+  data without a per-key hash table — in MiniSpark we still sort in memory,
+  so the benefit is pedagogical, not memory-real.
+- `LEFT_SEMI` / `LEFT_ANTI` are existence tests (the `EXISTS`/`NOT EXISTS`
+  shape) and output the **left columns only**. Equi semi/anti reuse the
+  cogroup-based `ShuffledHashJoinExec` ("has a match" = right list non-empty);
+  non-equi semi/anti use the nested-loop operator.
+
+### Join types & the `condition` field
+
+`JoinType` covers INNER/LEFT/RIGHT/FULL/LEFT_SEMI/LEFT_ANTI/CROSS. The logical
+`Join` node carries an optional `condition` expression (null for a pure
+equi-join); it binds against the combined `left ++ right` layout
+(`Join.combinedInputSchema`) so a predicate can reference both sides, and the
+nested-loop/cartesian operators build that combined row to evaluate it. DataFrame
+API: `df.crossJoin(other)` and `df.join(other, conditionColumn, joinType)`
+alongside the existing equi-key `join`.
 
 ### Runtime AQE join demotion
 

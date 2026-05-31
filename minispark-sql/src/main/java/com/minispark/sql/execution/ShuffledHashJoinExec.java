@@ -77,6 +77,18 @@ public final class ShuffledHashJoinExec implements PhysicalPlan {
             List<Row> rights = entry._2()._2();
             List<Row> out = new ArrayList<>();
 
+            // Semi/anti are existence tests: emit the LEFT row(s) only, never
+            // the right columns. The cogroup already grouped both sides by key,
+            // so "has a match" is just "rights non-empty".
+            if (jt == JoinType.LEFT_SEMI) {
+                if (!rights.isEmpty()) out.addAll(lefts);
+                return out.iterator();
+            }
+            if (jt == JoinType.LEFT_ANTI) {
+                if (rights.isEmpty()) out.addAll(lefts);
+                return out.iterator();
+            }
+
             boolean emitUnmatchedLeft = jt == JoinType.LEFT || jt == JoinType.FULL;
             boolean emitUnmatchedRight = jt == JoinType.RIGHT || jt == JoinType.FULL;
 

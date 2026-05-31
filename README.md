@@ -166,20 +166,21 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 
 ## Status
 
-All build phases plus Tier A (engine completion), Tier B (SQL), three
-physical join strategies (broadcast-hash / shuffled-hash / sort-merge),
-three AQE rules (post-shuffle partition coalesce, skew-partition split,
-runtime join-demote to broadcast), window functions
-(ROW_NUMBER / RANK / DENSE_RANK), and Spark-style memory management
-(UnifiedMemoryManager + TaskMemoryManager + spillable
-ExternalAppendOnlyMap + `-Xmx` enforcement) are done.
-`mvn clean install` → **BUILD SUCCESS, 221 tests**
-(4 rpc + 79 core + 83 sql + 55 examples). Every feature has an end-to-end
-example that runs across a driver + 2 executor JVMs over TCP — 41 worked
+All build phases plus Tier A (engine completion), Tier B (SQL), all five
+physical join strategies (broadcast-hash / shuffled-hash / sort-merge /
+cartesian-product / broadcast-nested-loop) across every join type
+(INNER/LEFT/RIGHT/FULL/SEMI/ANTI/CROSS), three AQE rules (post-shuffle
+partition coalesce, skew-partition split, runtime join-demote to
+broadcast), window functions (ROW_NUMBER / RANK / DENSE_RANK), and
+Spark-style memory management (UnifiedMemoryManager + TaskMemoryManager +
+spillable ExternalAppendOnlyMap + `-Xmx` enforcement) are done.
+`mvn clean install` → **BUILD SUCCESS, 232 tests**
+(4 rpc + 79 core + 90 sql + 59 examples). Every feature has an end-to-end
+example that runs across a driver + 2 executor JVMs over TCP — 44 worked
 distributed examples in `minispark-examples/.../dist/` (data-plane ops, SQL,
-AQE, window functions, memory/spill, plus control-plane: dynamic allocation,
-speculation, and the MiniYarn cluster manager). See the
-[example gallery](docs/RUNBOOK.md#distributed-example-gallery-41-worked-examples).
+AQE, window functions, all join strategies, memory/spill, plus control-plane:
+dynamic allocation, speculation, and the MiniYarn cluster manager). See the
+[example gallery](docs/RUNBOOK.md#distributed-example-gallery-44-worked-examples).
 The codebase passed a high-effort code review (10 findings, all fixed).
 Every distributed use case has an integration test that spawns real
 executor JVMs.

@@ -111,6 +111,26 @@ public final class SparkPlanner {
      */
     private PhysicalPlan planJoin(com.minispark.sql.plan.Join j) {
         JoinType jt = j.joinType();
+
+        // No equi-key → non-equi or cross join. A pure cartesian (no predicate,
+        // INNER/CROSS) is a CartesianProductExec; anything with a condition (or
+        // an outer/semi/anti shape without keys) is a BroadcastNestedLoopJoin.
+        if (j.leftKeys().isEmpty()) {
+            PhysicalPlan l = plan(j.left());
+            PhysicalPlan r = plan(j.right());
+            if (j.condition() == null && (jt == JoinType.INNER || jt == JoinType.CROSS)) {
+                return new CartesianProductExec(j.schema(), l, r, sc);
+            }
+            return new BroadcastNestedLoopJoinExec(jt, j.schema(), l, r, j.condition(), sc);
+        }
+
+        // Equi-join. Semi/anti go straight to the cogroup-based shuffled-hash
+        // join (which handles them); they don't broadcast or sort-merge here.
+        if (jt == JoinType.LEFT_SEMI || jt == JoinType.LEFT_ANTI) {
+            return new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
+                    plan(j.left()), plan(j.right()));
+        }
+
         // FULL OUTER skips broadcast (can't emit unmatched build-side rows
         // map-only). It still has the shuffled-hash vs sort-merge choice.
         boolean canBroadcast = jt != JoinType.FULL;

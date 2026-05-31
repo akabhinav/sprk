@@ -24,6 +24,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
+import static com.minispark.sql.Column.col;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -190,5 +191,57 @@ final class WindowOuterJoinDistributedExamplesTest {
         assertThat(counts.get("total")).isEqualTo(4L);
         assertThat(counts.get("leftNull")).isEqualTo(1L);   // orphan
         assertThat(counts.get("rightNull")).isEqualTo(1L);  // alice
+    }
+
+    // Example 42 — CROSS join (cartesian product) distributed: |L| × |R| rows.
+    @Test
+    void ex42_cross_join_cartesian_product() {
+        long n = runSql("ex42-cross", spark -> {
+            DataFrame a = spark.createDataFrame(List.of(Row.of(1), Row.of(2), Row.of(3)),
+                    StructType.of(StructField.of("a", DataType.INT)));
+            DataFrame b = spark.createDataFrame(List.of(Row.of(10), Row.of(20)),
+                    StructType.of(StructField.of("b", DataType.INT)));
+            return a.crossJoin(b).count();
+        });
+        assertThat(n).isEqualTo(3L * 2);   // cartesian product
+    }
+
+    // Example 43 — non-equi range join distributed (no equi-key → nested loop):
+    // each point matched to the bucket whose [lo,hi) contains it.
+    @Test
+    void ex43_non_equi_range_join() {
+        long matched = runSql("ex43-range-join", spark -> {
+            DataFrame buckets = spark.createDataFrame(List.of(
+                    Row.of(0, 10, "low"), Row.of(10, 20, "mid"), Row.of(20, 30, "high")),
+                    StructType.of(StructField.of("lo", DataType.INT),
+                            StructField.of("hi", DataType.INT), StructField.of("label", DataType.STRING)));
+            List<Row> pts = new ArrayList<>();
+            for (int i = 0; i < 300; i++) pts.add(Row.of(i % 30));   // 0..29, 10 each
+            DataFrame points = spark.createDataFrame(pts, StructType.of(StructField.of("x", DataType.INT)));
+            return points.join(buckets,
+                    col("x").ge(col("lo")).and(col("x").lt(col("hi"))), JoinType.INNER).count();
+        });
+        // every x in 0..29 falls in exactly one of the three buckets → all 300 match.
+        assertThat(matched).isEqualTo(300L);
+    }
+
+    // Example 44 — LEFT_SEMI distributed: left rows that have a match, left columns only.
+    @Test
+    void ex44_left_semi_join() {
+        long kept = runSql("ex44-left-semi", spark -> {
+            List<Row> people = new ArrayList<>();
+            for (int i = 1; i <= 100; i++) people.add(Row.of(i, "p" + i));
+            DataFrame p = spark.createDataFrame(people, StructType.of(
+                    StructField.of("id", DataType.INT), StructField.of("name", DataType.STRING)));
+            List<Row> orders = new ArrayList<>();
+            for (int i = 1; i <= 60; i++) orders.add(Row.of(i, "o" + i));   // ids 1..60 have orders
+            DataFrame o = spark.createDataFrame(orders, StructType.of(
+                    StructField.of("oid", DataType.INT), StructField.of("item", DataType.STRING)));
+            List<Row> res = p.join(o, List.of("id"), List.of("oid"), JoinType.LEFT_SEMI).collect();
+            assertThat(res).allSatisfy(r -> assertThat(r.size()).isEqualTo(2));  // left columns only
+            return res.size();
+        });
+        // people 1..60 have orders; 61..100 don't. SEMI keeps the 60 with a match.
+        assertThat(kept).isEqualTo(60L);
     }
 }
