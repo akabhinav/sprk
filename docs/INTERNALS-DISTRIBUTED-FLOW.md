@@ -551,6 +551,9 @@ the same path you traced here.
 | stages/tasks | `scheduler.{ShuffleMapStage,ResultStage,…Task}` | same names |
 | AQE coalesce | `scheduler.adaptive.CoalesceShufflePartitionsRule` | `sql.execution.adaptive.CoalesceShufflePartitions` |
 | per-map size report | `scheduler.MapTaskOutput` | `scheduler.MapStatus` (with size array) |
+| shuffled hash join | `sql.execution.ShuffledHashJoinExec` | same |
+| broadcast hash join | `sql.execution.BroadcastHashJoinExec` | same |
+| broadcast hint | `sql.plan.BroadcastHint` / `DataFrame.broadcast()` | `ResolvedHint(_, HintInfo(BROADCAST))` |
 | task dispatcher | `scheduler.TaskScheduler` | `TaskSchedulerImpl` + `TaskSetManager` |
 | backend | `cluster.CoarseGrainedSchedulerBackend` | same |
 | executor backend | `cluster.CoarseGrainedExecutorBackend` | same |

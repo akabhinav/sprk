@@ -95,6 +95,17 @@ public final class DataFrame {
         return new DataFrame(session, new com.minispark.sql.plan.Distinct(logicalPlan));
     }
 
+    /**
+     * Hint that this DataFrame should be materialised and broadcast when used
+     * as one side of a join — the planner then picks
+     * {@link com.minispark.sql.execution.BroadcastHashJoinExec} instead of the
+     * shuffled variant, avoiding the shuffle on the streaming side entirely.
+     * Use for small dimension tables (a few MB or a few thousand rows).
+     */
+    public DataFrame broadcast() {
+        return new DataFrame(session, new com.minispark.sql.plan.BroadcastHint(logicalPlan));
+    }
+
     /** Group by the given columns; call {@code .agg(...)} on the result. */
     public GroupedData groupBy(Column... cols) {
         List<Expression> exprs = new ArrayList<>(cols.length);

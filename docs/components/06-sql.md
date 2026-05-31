@@ -143,6 +143,28 @@ their physical plans compile down to ShuffledRDDs. See
 [INTERNALS-DISTRIBUTED-FLOW §7.5](../INTERNALS-DISTRIBUTED-FLOW.md#75-aqe-coalesce--optional-re-plan-between-map-and-reduce)
 for the end-to-end trace.
 
+### Join strategy selection
+
+The planner picks between two physical join operators:
+
+| Operator | When picked | Cost shape |
+|----------|-------------|------------|
+| `BroadcastHashJoinExec` | one side has a `df.broadcast()` hint, **or** one side is a `LocalRelation` under `minispark.sql.autoBroadcastJoinThreshold.rows` (default 1000) | small side collected to driver → one broadcast hop per executor; streaming side never shuffled |
+| `ShuffledHashJoinExec` | everything else, **and always for FULL OUTER** | both sides bucketed by join key via a `CoGroupedRDD` shuffle |
+
+The hint is a logical pass-through node (`plan.BroadcastHint`) that survives
+optimizer rewrites. Build-side eligibility per join type is enforced in
+`BroadcastHashJoinExec.{canBuildLeft, canBuildRight}` — broadcasting the LEFT
+side is only safe for INNER and RIGHT joins (a LEFT outer would need to know
+which build-side rows had no probe match, which a map-only operator can't
+report). FULL OUTER never broadcasts.
+
+What's NOT implemented yet: runtime demotion (turn a planned
+`ShuffledHashJoinExec` into `BroadcastHashJoinExec` after a parent map stage
+materialises and one side turns out small). That needs a query-stage
+materialisation barrier in the SQL planner — a natural follow-on to
+`CoalesceShufflePartitionsRule`.
+
 ## SQL parser
 
 Hand-written **lexer → recursive-descent parser** producing an unresolved

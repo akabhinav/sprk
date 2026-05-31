@@ -248,6 +248,13 @@ back to system properties).
 
 What this does: after a `ShuffleMapStage` finishes, the driver reads the real per-reducer byte sizes from `MapOutputTracker` and runs `CoalesceShufflePartitionsRule`. If the original 200-way reducer layout writes 8 MiB total, the rule collapses it to one fat range so the downstream stage runs 1 task instead of 200. The job answer is identical; only the task count changes. Gated to the final `ResultStage`, so no downstream shuffle ever sees a re-partitioned input. Mirrors real Spark's `spark.sql.adaptive.*` keys exactly.
 
+### Join planner
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `minispark.sql.autoBroadcastJoinThreshold.rows` | `1000` | a `LocalRelation` side at or under this row count is auto-broadcast (no shuffle on the other side). Set to `0` to disable. |
+
+Force broadcast on any side with `df.broadcast()` regardless of size; the planner respects the hint as long as the join type allows it (INNER + RIGHT can build LEFT; INNER + LEFT can build RIGHT; FULL OUTER always shuffles). See [components/06-sql.md](components/06-sql.md#join-strategy-selection) for the full decision table.
+
 ---
 
 ## 5. Verifying a distributed run
