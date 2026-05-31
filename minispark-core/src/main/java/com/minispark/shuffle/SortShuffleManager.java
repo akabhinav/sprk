@@ -83,7 +83,7 @@ public final class SortShuffleManager implements ShuffleManager {
         SortWriter(ShuffleHandle handle, int mapId) { this.handle = handle; this.mapId = mapId; }
 
         @Override
-        public void write(Iterator<Tuple2<K, V>> records) {
+        public long[] write(Iterator<Tuple2<K, V>> records) {
             int r = handle.partitioner.numPartitions();
             List<List<Tuple2<K, V>>> byReducer = new ArrayList<>(r);
             for (int i = 0; i < r; i++) byReducer.add(new ArrayList<>());
@@ -98,20 +98,29 @@ public final class SortShuffleManager implements ShuffleManager {
 
             // Serialize as [int numPartitions][per-partition: int count, records...].
             // The per-partition counts ARE the index: a reader skips to its slice.
+            // Track each partition's byte contribution by sampling baos.size()
+            // before/after — those are the AQE inputs that drive coalesce decisions.
+            long[] sizes = new long[r];
             try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
                  ObjectOutputStream oos = new ObjectOutputStream(baos)) {
                 oos.writeInt(r);
+                oos.flush();
+                int prev = baos.size();
                 for (int p = 0; p < r; p++) {
                     List<Tuple2<K, V>> bucket = byReducer.get(p);
                     oos.writeInt(bucket.size());
                     for (Tuple2<K, V> kv : bucket) oos.writeObject(kv);
+                    oos.flush();
+                    int now = baos.size();
+                    sizes[p] = now - prev;
+                    prev = now;
                 }
-                oos.flush();
                 blockManager.putBlock(new BlockId.ShuffleDataBlock(handle.shuffleId, mapId),
                         baos.toByteArray());
             } catch (Exception e) {
                 throw new RuntimeException("sort-shuffle write failed", e);
             }
+            return sizes;
         }
 
         @Override public void stop(boolean success) { /* in-memory: nothing to release */ }

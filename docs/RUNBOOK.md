@@ -239,6 +239,15 @@ back to system properties).
 | `minispark.ui.host` | `127.0.0.1` | UI bind host |
 | `minispark.ui.port` | `4040` | UI port (0 = ephemeral) |
 
+### Adaptive Query Execution (AQE)
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `minispark.sql.adaptive.enabled` | `false` | turn on the AQE post-shuffle re-planner |
+| `minispark.sql.adaptive.coalescePartitions.targetSizeInBytes` | `67108864` (64 MiB) | target byte size per post-shuffle partition; contiguous reducers below this are fused into one task |
+| `minispark.sql.adaptive.coalescePartitions.minPartitionNum` | `1` | floor on the post-shuffle partition count (so heavy queries don't drop below useful parallelism) |
+
+What this does: after a `ShuffleMapStage` finishes, the driver reads the real per-reducer byte sizes from `MapOutputTracker` and runs `CoalesceShufflePartitionsRule`. If the original 200-way reducer layout writes 8 MiB total, the rule collapses it to one fat range so the downstream stage runs 1 task instead of 200. The job answer is identical; only the task count changes. Gated to the final `ResultStage`, so no downstream shuffle ever sees a re-partitioned input. Mirrors real Spark's `spark.sql.adaptive.*` keys exactly.
+
 ---
 
 ## 5. Verifying a distributed run

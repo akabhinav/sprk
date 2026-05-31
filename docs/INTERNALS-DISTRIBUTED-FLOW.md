@@ -323,6 +323,43 @@ Trace it:
 
 ---
 
+## 7.5. AQE coalesce — optional re-plan between map and reduce
+
+> Real Spark equivalent: `org.apache.spark.sql.execution.adaptive.CoalesceShufflePartitions`,
+> applied by `AdaptiveSparkPlanExec` between query stages.
+
+Set `minispark.sql.adaptive.enabled=true` and a second thing happens before
+Stage 2 is submitted: `DAGScheduler.maybeCoalesceShuffles` walks the result
+RDD's narrow lineage to every `ShuffledRDD`, asks `MapOutputTracker` for the
+just-published per-reducer byte totals (`getReducerSizes`), and runs
+`CoalesceShufflePartitionsRule.plan(sizes, targetBytes, minPartitions)` to
+produce a list of `[startReducerId, endReducerId)` ranges. Each range becomes
+one post-shuffle partition — `ShuffledRDD.applyCoalescedRanges` rebuilds its
+internal slice list, and `compute()` reads the wider range via
+`getReader(handle, start, end)` (the reader signature already supported ranges
+since day one).
+
+So when WordCount's reduce side has 16 reducer ids carrying 8 MiB total and
+the target is 64 MiB, Stage 2 ships **one** ResultTask instead of sixteen.
+The map side is untouched: writers still partition into 16 buckets. Only the
+read groupings collapse, which is exactly the AQE shape.
+
+Why it's gated to the final stage: a downstream `ShuffleMapStage` would be
+written against the parent's stated partitioner, and coalescing changes the
+post-shuffle partition count, breaking that contract. So the recursion stops
+at any nested `ShuffleDependency` — only shuffles whose consumer is the
+ResultStage are eligible. (Real Spark AQE handles this with explicit query-stage
+boundaries; the simplification here is the same idea applied bluntly.)
+
+What's not implemented: skew-join split (detect a single reducer that's much
+bigger than its siblings and break it into N sub-tasks) and SMJ → broadcast
+demotion (when a child's materialised size fits the broadcast threshold). Both
+would slot into the same `maybeCoalesceShuffles` hook with their own rule
+classes — the structural plumbing (per-reducer size reporting end-to-end,
+range-aware readers, post-stage re-planning callback) is already there.
+
+---
+
 ## 8. Back up the stack — results to the user
 
 `TaskScheduler.taskCompleted` (`:219`) records each result; when a stage's last
@@ -512,6 +549,8 @@ the same path you traced here.
 | dependency | `rdd.{Narrow,Shuffle}Dependency` | same |
 | DAG planner | `scheduler.DAGScheduler` | `scheduler.DAGScheduler` |
 | stages/tasks | `scheduler.{ShuffleMapStage,ResultStage,…Task}` | same names |
+| AQE coalesce | `scheduler.adaptive.CoalesceShufflePartitionsRule` | `sql.execution.adaptive.CoalesceShufflePartitions` |
+| per-map size report | `scheduler.MapTaskOutput` | `scheduler.MapStatus` (with size array) |
 | task dispatcher | `scheduler.TaskScheduler` | `TaskSchedulerImpl` + `TaskSetManager` |
 | backend | `cluster.CoarseGrainedSchedulerBackend` | same |
 | executor backend | `cluster.CoarseGrainedExecutorBackend` | same |

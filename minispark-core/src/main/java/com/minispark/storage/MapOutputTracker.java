@@ -33,7 +33,21 @@ public final class MapOutputTracker implements RpcEndpoint {
     /** Endpoint name under which the master is published. */
     public static final String ENDPOINT_NAME = "MapOutputTracker";
 
-    public record MapStatus(int mapId, ExecutorLocation location) implements Serializable {}
+    /**
+     * Per-map-task status published by the driver. {@code partitionBytes[i]} is
+     * the byte size of bucket {@code i} written by this map task, used by
+     * {@link com.minispark.scheduler.adaptive.CoalesceShufflePartitionsRule}
+     * to compute coalesce plans. May be {@code null} (length 0) for legacy
+     * call sites that don't track sizes.
+     */
+    public record MapStatus(int mapId, ExecutorLocation location, long[] partitionBytes)
+            implements Serializable {
+        public MapStatus(int mapId, ExecutorLocation location) {
+            this(mapId, location, EMPTY_SIZES);
+        }
+    }
+
+    private static final long[] EMPTY_SIZES = new long[0];
 
     /** Worker → Master: "give me all map statuses for this shuffle." */
     public record GetMapStatuses(int shuffleId) implements Serializable {}
@@ -64,7 +78,32 @@ public final class MapOutputTracker implements RpcEndpoint {
     }
 
     public synchronized void registerMapOutput(int shuffleId, int mapId, ExecutorLocation loc) {
-        byShuffle.computeIfAbsent(shuffleId, k -> new HashMap<>()).put(mapId, new MapStatus(mapId, loc));
+        registerMapOutput(shuffleId, mapId, loc, EMPTY_SIZES);
+    }
+
+    public synchronized void registerMapOutput(int shuffleId, int mapId,
+                                               ExecutorLocation loc, long[] partitionBytes) {
+        byShuffle.computeIfAbsent(shuffleId, k -> new HashMap<>())
+                .put(mapId, new MapStatus(mapId, loc, partitionBytes));
+    }
+
+    /**
+     * Sum the per-reducer byte sizes across every map output registered for a
+     * shuffle. Returned array length is {@code numReducers}; an entry is 0 if
+     * no map status carries sizes for that reducer (e.g. recovery path that
+     * didn't repopulate sizes). This is the input AQE rules consume.
+     */
+    public synchronized long[] getReducerSizes(int shuffleId, int numReducers) {
+        long[] totals = new long[numReducers];
+        Map<Integer, MapStatus> m = byShuffle.get(shuffleId);
+        if (m == null) return totals;
+        for (MapStatus s : m.values()) {
+            long[] sizes = s.partitionBytes();
+            if (sizes == null) continue;
+            int n = Math.min(sizes.length, numReducers);
+            for (int i = 0; i < n; i++) totals[i] += sizes[i];
+        }
+        return totals;
     }
 
     public void unregisterShuffle(int shuffleId) {

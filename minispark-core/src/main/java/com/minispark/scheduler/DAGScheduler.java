@@ -1,9 +1,12 @@
 package com.minispark.scheduler;
 
+import com.minispark.api.MiniSparkConf;
 import com.minispark.rdd.Dependency;
 import com.minispark.rdd.Partition;
 import com.minispark.rdd.RDD;
 import com.minispark.rdd.ShuffleDependency;
+import com.minispark.rdd.ShuffledRDD;
+import com.minispark.scheduler.adaptive.CoalesceShufflePartitionsRule;
 import com.minispark.scheduler.cluster.TaskFailureReason;
 import com.minispark.status.LiveListenerBus;
 import com.minispark.status.SchedulerEvent;
@@ -47,6 +50,7 @@ public final class DAGScheduler {
     private final TaskScheduler taskScheduler;
     private final MapOutputTracker mapOutputTracker; // the driver-side master
     private final LiveListenerBus listenerBus;
+    private final MiniSparkConf conf;
     private final AtomicInteger stageIdGen = new AtomicInteger();
     private final AtomicInteger jobIdGen = new AtomicInteger();
 
@@ -81,9 +85,15 @@ public final class DAGScheduler {
 
     public DAGScheduler(TaskScheduler taskScheduler, MapOutputTracker mapOutputTracker,
                         LiveListenerBus listenerBus) {
+        this(taskScheduler, mapOutputTracker, listenerBus, new MiniSparkConf());
+    }
+
+    public DAGScheduler(TaskScheduler taskScheduler, MapOutputTracker mapOutputTracker,
+                        LiveListenerBus listenerBus, MiniSparkConf conf) {
         this.taskScheduler = taskScheduler;
         this.mapOutputTracker = mapOutputTracker;
         this.listenerBus = listenerBus;
+        this.conf = conf != null ? conf : new MiniSparkConf();
         // The scheduler routes structural failures and executor-lost events here
         // so we can run the recovery loop that gives RDDs their "Resilient" R.
         taskScheduler.setDAGEventHandler(new TaskScheduler.DAGEventHandler() {
@@ -267,11 +277,12 @@ public final class DAGScheduler {
         // executor-lost events that race with stage completion.
         List<Integer> needsRedo = new ArrayList<>();
         for (TaskResult<?> r : results) {
-            ExecutorLocation loc = (ExecutorLocation) r.value;
-            if (deadLocations.contains(loc)) {
+            MapTaskOutput out = (MapTaskOutput) r.value;
+            if (deadLocations.contains(out.location())) {
                 needsRedo.add(r.partitionId);
             } else {
-                mapOutputTracker.registerMapOutput(shuffleId, r.partitionId, loc);
+                mapOutputTracker.registerMapOutput(shuffleId, r.partitionId,
+                        out.location(), out.partitionBytes());
             }
         }
         if (!needsRedo.isEmpty()) {
@@ -357,7 +368,9 @@ public final class DAGScheduler {
             List<TaskResult<?>> results = taskScheduler
                     .submitTasks(new TaskSet(recoveryStageId, tasks)).get();
             for (TaskResult<?> r : results) {
-                mapOutputTracker.registerMapOutput(shuffleId, r.partitionId, (ExecutorLocation) r.value);
+                MapTaskOutput out = (MapTaskOutput) r.value;
+                mapOutputTracker.registerMapOutput(shuffleId, r.partitionId,
+                        out.location(), out.partitionBytes());
             }
             LOG.info("Recovery: registered {} new map output(s) for shuffle {}",
                     results.size(), shuffleId);
@@ -370,8 +383,23 @@ public final class DAGScheduler {
     private <T, U> List<U> submitResultStage(ResultStage stage,
                                              ResultTask.ResultHandler<T, U> handler) {
         RDD<T> rdd = (RDD<T>) stage.rdd();
+        // AQE hook: every parent ShuffleMapStage has materialised, so the
+        // MapOutputTracker now knows the real per-reducer byte sizes. Replace
+        // the default (one partition per reducer) layout of every ShuffledRDD
+        // feeding this result stage with a coalesced layout when the workload
+        // doesn't justify so many tasks. Gated on minispark.sql.adaptive.enabled.
+        maybeCoalesceShuffles(rdd);
         List<Partition> parts = rdd.getPartitions();
         int[] toCompute = stage.partitionsToCompute();
+        // AQE may have shrunk the final RDD's partition count below what the
+        // ResultStage was created with. Clamp the index list to the new layout
+        // (whole-collect semantics still hold: a coalesced partition contains
+        // the union of the records its source reducers would have produced).
+        if (toCompute.length > parts.size()) {
+            int[] clamped = new int[parts.size()];
+            for (int i = 0; i < parts.size(); i++) clamped[i] = i;
+            toCompute = clamped;
+        }
         List<Task<?>> tasks = new ArrayList<>(toCompute.length);
         for (int outputId = 0; outputId < toCompute.length; outputId++) {
             int pIdx = toCompute[outputId];
@@ -404,4 +432,58 @@ public final class DAGScheduler {
         return out;
     }
 
+    // ---------- Adaptive Query Execution: coalesce shuffle partitions ----------
+
+    /**
+     * If AQE is enabled, walk the result RDD's lineage looking for ShuffledRDDs
+     * (which are the post-shuffle reads of completed parent map stages) and
+     * replace their default per-reducer partition layout with a coalesced one
+     * derived from real map-output sizes. Stops walking through any further
+     * ShuffleDependency: re-partitioning the parent of another shuffle would
+     * break that downstream shuffle's input contract.
+     */
+    private void maybeCoalesceShuffles(RDD<?> resultRdd) {
+        if (!conf.get("minispark.sql.adaptive.enabled", "false").equalsIgnoreCase("true")) return;
+        long targetBytes = Long.parseLong(
+                conf.get("minispark.sql.adaptive.coalescePartitions.targetSizeInBytes", "67108864"));
+        int minPartitions = conf.getInt(
+                "minispark.sql.adaptive.coalescePartitions.minPartitionNum", 1);
+
+        Set<Integer> visited = new HashSet<>();
+        List<ShuffledRDD<?, ?>> targets = new ArrayList<>();
+        findShuffledRdds(resultRdd, targets, visited);
+
+        for (ShuffledRDD<?, ?> sh : targets) {
+            int shuffleId = sh.shuffleDep().shuffleId();
+            int numReducers = sh.shuffleDep().partitioner().numPartitions();
+            long[] sizes = mapOutputTracker.getReducerSizes(shuffleId, numReducers);
+            List<int[]> ranges = CoalesceShufflePartitionsRule.plan(sizes, targetBytes, minPartitions);
+            if (ranges.size() < numReducers) {
+                LOG.info("AQE: coalesced shuffle {} from {} to {} post-shuffle partitions (target={} bytes)",
+                        shuffleId, numReducers, ranges.size(), targetBytes);
+                sh.applyCoalescedRanges(ranges);
+            } else {
+                LOG.debug("AQE: shuffle {} stays at {} partitions (no coalesce benefit)",
+                        shuffleId, numReducers);
+            }
+        }
+    }
+
+    /** DFS for ShuffledRDDs reachable through narrow dependencies only. */
+    private void findShuffledRdds(RDD<?> rdd, List<ShuffledRDD<?, ?>> out, Set<Integer> visited) {
+        if (!visited.add(rdd.id())) return;
+        if (rdd instanceof ShuffledRDD<?, ?> sh) {
+            out.add(sh);
+            // Do not recurse into the shuffle's input RDD: that lineage is on
+            // the other side of a stage boundary we just materialised, and any
+            // ShuffledRDD found there would already have been coalesced as part
+            // of an earlier result-stage submit (or is not reachable from this job).
+            return;
+        }
+        for (Dependency<?> d : rdd.getDependencies()) {
+            // Don't traverse into another ShuffleDependency's parent — same reason.
+            if (d instanceof ShuffleDependency<?, ?>) continue;
+            findShuffledRdds(d.rdd(), out, visited);
+        }
+    }
 }

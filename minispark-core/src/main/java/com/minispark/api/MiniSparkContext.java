@@ -180,7 +180,7 @@ public final class MiniSparkContext implements AutoCloseable {
         this.taskScheduler.setBackend(backend);
         this.backend.start();
 
-        this.dagScheduler = new DAGScheduler(taskScheduler, mapOutputTracker, listenerBus);
+        this.dagScheduler = new DAGScheduler(taskScheduler, mapOutputTracker, listenerBus, conf);
 
         // Dynamic allocation: opt-in, and only meaningful when the launcher can
         // add/remove executors at runtime (netty/process or yarn modes).

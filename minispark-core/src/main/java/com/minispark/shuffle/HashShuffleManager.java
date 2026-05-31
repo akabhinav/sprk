@@ -78,7 +78,7 @@ public final class HashShuffleManager implements ShuffleManager {
         }
 
         @Override
-        public void write(Iterator<Tuple2<K, V>> records) {
+        public long[] write(Iterator<Tuple2<K, V>> records) {
             int r = handle.partitioner.numPartitions();
             // Allocate one growing list per reducer; this is the "hash shuffle" pattern.
             // Heap usage scales as O(records); fine for learning, addressed by sort shuffle.
@@ -91,16 +91,19 @@ public final class HashShuffleManager implements ShuffleManager {
                 buckets.get(p).add(kv);
             }
 
+            long[] sizes = new long[r];
             for (int reduceId = 0; reduceId < r; reduceId++) {
                 List<Tuple2<K, V>> bucket = buckets.get(reduceId);
                 byte[] bytes = writeBucket(bucket);
                 BlockId.ShuffleBlock id = new BlockId.ShuffleBlock(handle.shuffleId, mapId, reduceId);
                 blockManager.putBlock(id, bytes);
+                sizes[reduceId] = bytes.length;
             }
             // NB: we do NOT register the map output here. The task returns its
             // block location and the driver's DAGScheduler registers it with the
             // master MapOutputTracker. This keeps the authoritative map on the
             // driver, which is essential once executors live in other JVMs.
+            return sizes;
         }
 
         @Override public void stop(boolean success) { /* nothing to release for in-memory writer */ }

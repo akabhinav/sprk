@@ -166,8 +166,13 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 
 ## Status
 
-All build phases plus Tier A (engine completion) and Tier B (SQL) are done.
-`mvn clean install` → **BUILD SUCCESS, 109 tests** (4 rpc + 49 core + 49 sql +
-7 examples). The codebase passed a high-effort code review (10 findings, all
-fixed). Every distributed use case has an integration test that spawns real
-executor JVMs.
+All build phases plus Tier A (engine completion), Tier B (SQL), and an initial
+AQE rule (post-shuffle partition coalesce) are done. `mvn clean install` →
+**BUILD SUCCESS, 145 tests** (4 rpc + 58 core + 49 sql + 34 examples). The
+codebase passed a high-effort code review (10 findings, all fixed). Every
+distributed use case has an integration test that spawns real executor JVMs.
+
+Adaptive Query Execution: opt-in coalesce of post-shuffle partitions based on
+real map-output sizes (`minispark.sql.adaptive.enabled=true` — see
+[RUNBOOK §4](docs/RUNBOOK.md#adaptive-query-execution-aqe)). Skew-join split
+and sort-merge → broadcast demotion are not implemented yet.

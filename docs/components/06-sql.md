@@ -128,6 +128,21 @@ flowchart LR
 as it pushes (since the analyzer already turned names into output-schema
 ordinals) — and refuses to push when a needed column isn't available downstream.
 
+### Adaptive Query Execution (runtime re-plan)
+
+The compile-time optimizer above doesn't know how much data each shuffle bucket
+will contain — that's only knowable once the upstream map stage runs. AQE
+(opt-in via `minispark.sql.adaptive.enabled=true`) waits for the map stage to
+materialise and then re-plans the downstream stage from the real per-reducer
+byte sizes reported by `MapOutputTracker`. The one rule implemented is
+`CoalesceShufflePartitionsRule`: contiguous reducers whose summed bytes fall
+under the target are fused into a single post-shuffle task. Lives in the
+scheduler (`scheduler.adaptive.CoalesceShufflePartitionsRule`) because it
+operates at the RDD/stage layer — DataFrame jobs benefit automatically since
+their physical plans compile down to ShuffledRDDs. See
+[INTERNALS-DISTRIBUTED-FLOW §7.5](../INTERNALS-DISTRIBUTED-FLOW.md#75-aqe-coalesce--optional-re-plan-between-map-and-reduce)
+for the end-to-end trace.
+
 ## SQL parser
 
 Hand-written **lexer → recursive-descent parser** producing an unresolved
