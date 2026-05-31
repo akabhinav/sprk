@@ -300,15 +300,16 @@ mvn -pl minispark-sql      test -Dtest=SqlDistributedTest            # spark.sql
 They **abort (skip) gracefully** if the sandbox can't spawn child JVMs, rather
 than failing.
 
-### Distributed example gallery (20 worked examples)
+### Distributed example gallery (38 worked examples)
 
-`minispark-examples/.../dist/` holds 20 end-to-end examples, all run across a
-driver + 2 executor JVMs over TCP (shared harness: `DistTestSupport` — spins up
-the cluster on a watchdog thread and aborts cleanly if JVMs can't spawn).
+`minispark-examples/.../dist/` holds 38 end-to-end examples covering **every**
+feature, all run across a driver + 2 executor JVMs over TCP (shared harness:
+`DistTestSupport` — spins up the cluster on a watchdog thread and aborts
+cleanly if JVMs can't spawn).
 
 ```bash
-# all 20 at once
-mvn -pl minispark-examples test -Dtest='RddDistributedExamplesTest,FeatureDistributedExamplesTest,SqlDistributedExamplesTest'
+# all 38 at once
+mvn -pl minispark-examples test -Dtest='*DistributedExamplesTest'
 ```
 
 | # | Example | Exercises |
@@ -333,12 +334,33 @@ mvn -pl minispark-examples test -Dtest='RddDistributedExamplesTest,FeatureDistri
 | 18 | SQL aggregate in expression | `sum(age)+1` |
 | 19 | SQL ORDER BY ... LIMIT | distributed top-N |
 | 20 | CSV read → query → write → read | full batch I/O round-trip |
+| 21 | AQE coalesce partitions | `adaptive.enabled` — fuse small reducers |
+| 22 | AQE skew-join split | `adaptive.skewJoin.enabled` — split a HOT key |
+| 23 | broadcast hash join | small side auto-broadcast (asserts the operator via `explain()`) |
+| 24 | sort-merge join | `preferSortMergeJoin` (asserts the operator) |
+| 25 | AQE runtime join demote | small-after-filter side demoted to broadcast at runtime |
+| 26 | window ROW_NUMBER | sequential index per partition |
+| 27 | window RANK | ties leave gaps |
+| 28 | window DENSE_RANK | ties, no gaps |
+| 29 | LEFT outer join | right side null-padded |
+| 30 | RIGHT outer join | left side null-padded |
+| 31 | FULL outer join | both unmatched sides kept |
+| 32 | spillable aggregation | wide reduceByKey under a 16k memory budget (spills to disk) |
+| 33 | take + first | bounded actions |
+| 34 | takeOrdered | distributed top-N comparator |
+| 35 | saveAsTextFile → textFile | write part files + read back |
+| 36 | checkpoint | lineage truncation to reliable storage |
+| 37 | cogroup | group both sides by key |
+| 38 | FAIR scheduler pool | `scheduler.mode=FAIR` + weighted pool |
 
 Run one group:
 ```bash
-mvn -pl minispark-examples test -Dtest=RddDistributedExamplesTest       # 1–7
-mvn -pl minispark-examples test -Dtest=FeatureDistributedExamplesTest   # 8–13
-mvn -pl minispark-examples test -Dtest=SqlDistributedExamplesTest        # 14–20
+mvn -pl minispark-examples test -Dtest=RddDistributedExamplesTest             # 1–7
+mvn -pl minispark-examples test -Dtest=FeatureDistributedExamplesTest         # 8–13
+mvn -pl minispark-examples test -Dtest=SqlDistributedExamplesTest             # 14–20
+mvn -pl minispark-examples test -Dtest=AqeDistributedExamplesTest             # 21–25
+mvn -pl minispark-examples test -Dtest=WindowOuterJoinDistributedExamplesTest # 26–31
+mvn -pl minispark-examples test -Dtest=EngineRddDistributedExamplesTest       # 32–38
 ```
 
 ---
