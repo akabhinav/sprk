@@ -252,6 +252,7 @@ What this does: after a `ShuffleMapStage` finishes, the driver reads the real pe
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `minispark.sql.autoBroadcastJoinThreshold.rows` | `1000` | a `LocalRelation` side at or under this row count is auto-broadcast (no shuffle on the other side). Set to `0` to disable. |
+| `minispark.sql.join.preferSortMergeJoin` | `false` | when the non-broadcast path is taken, choose `SortMergeJoinExec` (Spark's default for large joins) over `ShuffledHashJoinExec`. Output is identical; SMJ avoids the in-memory hash table per key group. |
 
 Force broadcast on any side with `df.broadcast()` regardless of size; the planner respects the hint as long as the join type allows it (INNER + RIGHT can build LEFT; INNER + LEFT can build RIGHT; FULL OUTER always shuffles). See [components/06-sql.md](components/06-sql.md#join-strategy-selection) for the full decision table.
 

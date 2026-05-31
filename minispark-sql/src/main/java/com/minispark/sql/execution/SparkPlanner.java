@@ -24,15 +24,21 @@ public final class SparkPlanner {
     private static final String AUTO_BCAST_THRESHOLD_KEY = "minispark.sql.autoBroadcastJoinThreshold.rows";
     private static final int AUTO_BCAST_THRESHOLD_DEFAULT = 1000;
 
+    /** When neither side is broadcast-eligible, prefer SortMergeJoin over ShuffledHashJoin. */
+    private static final String PREFER_SMJ_KEY = "minispark.sql.join.preferSortMergeJoin";
+
     private final MiniSparkContext sc;
     private final int numPartitions;
     private final int autoBroadcastRowThreshold;
+    private final boolean preferSortMergeJoin;
 
     public SparkPlanner(MiniSparkContext sc, int numPartitions) {
         this.sc = sc;
         this.numPartitions = numPartitions;
         this.autoBroadcastRowThreshold =
                 sc.conf().getInt(AUTO_BCAST_THRESHOLD_KEY, AUTO_BCAST_THRESHOLD_DEFAULT);
+        this.preferSortMergeJoin =
+                sc.conf().get(PREFER_SMJ_KEY, "false").equalsIgnoreCase("true");
     }
 
     public PhysicalPlan plan(LogicalPlan logical) {
@@ -89,35 +95,41 @@ public final class SparkPlanner {
      */
     private PhysicalPlan planJoin(com.minispark.sql.plan.Join j) {
         JoinType jt = j.joinType();
-        if (jt == JoinType.FULL) {
-            return new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
-                    plan(j.left()), plan(j.right()));
+        // FULL OUTER skips broadcast (can't emit unmatched build-side rows
+        // map-only). It still has the shuffled-hash vs sort-merge choice.
+        boolean canBroadcast = jt != JoinType.FULL;
+
+        if (canBroadcast) {
+            boolean rightHinted = hasBroadcastHint(j.right());
+            boolean leftHinted  = hasBroadcastHint(j.left());
+
+            // Hint wins over auto.
+            if (rightHinted && BroadcastHashJoinExec.canBuildRight(jt)) {
+                return broadcast(j, /*buildIsLeft=*/false);
+            }
+            if (leftHinted && BroadcastHashJoinExec.canBuildLeft(jt)) {
+                return broadcast(j, /*buildIsLeft=*/true);
+            }
+
+            // Auto-broadcast small static sides. Prefer right so INNER joins
+            // (always-eligible) stay symmetric with the hint path above.
+            Integer rightRows = staticRowCount(j.right());
+            if (rightRows != null && rightRows <= autoBroadcastRowThreshold
+                    && BroadcastHashJoinExec.canBuildRight(jt)) {
+                return broadcast(j, /*buildIsLeft=*/false);
+            }
+            Integer leftRows = staticRowCount(j.left());
+            if (leftRows != null && leftRows <= autoBroadcastRowThreshold
+                    && BroadcastHashJoinExec.canBuildLeft(jt)) {
+                return broadcast(j, /*buildIsLeft=*/true);
+            }
         }
 
-        boolean rightHinted = hasBroadcastHint(j.right());
-        boolean leftHinted  = hasBroadcastHint(j.left());
-
-        // Hint wins over auto.
-        if (rightHinted && BroadcastHashJoinExec.canBuildRight(jt)) {
-            return broadcast(j, /*buildIsLeft=*/false);
+        // Non-broadcast path: pick between shuffled-hash and sort-merge.
+        if (preferSortMergeJoin) {
+            return new SortMergeJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
+                    plan(j.left()), plan(j.right()), sc, numPartitions);
         }
-        if (leftHinted && BroadcastHashJoinExec.canBuildLeft(jt)) {
-            return broadcast(j, /*buildIsLeft=*/true);
-        }
-
-        // Auto-broadcast small static sides. Prefer right so INNER joins
-        // (always-eligible) stay symmetric with the hint path above.
-        Integer rightRows = staticRowCount(j.right());
-        if (rightRows != null && rightRows <= autoBroadcastRowThreshold
-                && BroadcastHashJoinExec.canBuildRight(jt)) {
-            return broadcast(j, /*buildIsLeft=*/false);
-        }
-        Integer leftRows = staticRowCount(j.left());
-        if (leftRows != null && leftRows <= autoBroadcastRowThreshold
-                && BroadcastHashJoinExec.canBuildLeft(jt)) {
-            return broadcast(j, /*buildIsLeft=*/true);
-        }
-
         return new ShuffledHashJoinExec(j.leftKeys(), j.rightKeys(), jt, j.schema(),
                 plan(j.left()), plan(j.right()));
     }

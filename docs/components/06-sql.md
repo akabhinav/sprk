@@ -145,25 +145,35 @@ for the end-to-end trace.
 
 ### Join strategy selection
 
-The planner picks between two physical join operators:
+The planner picks among three physical join operators:
 
 | Operator | When picked | Cost shape |
 |----------|-------------|------------|
 | `BroadcastHashJoinExec` | one side has a `df.broadcast()` hint, **or** one side is a `LocalRelation` under `minispark.sql.autoBroadcastJoinThreshold.rows` (default 1000) | small side collected to driver → one broadcast hop per executor; streaming side never shuffled |
-| `ShuffledHashJoinExec` | everything else, **and always for FULL OUTER** | both sides bucketed by join key via a `CoGroupedRDD` shuffle |
+| `SortMergeJoinExec` | not broadcast-eligible, and `minispark.sql.join.preferSortMergeJoin=true` | both sides shuffled through the **same** partitioner, then zipped per partition; each partition sorts its two sides and merge-iterates |
+| `ShuffledHashJoinExec` | the default non-broadcast fallback, **and always for FULL OUTER when SMJ is off** | both sides bucketed by join key via a `CoGroupedRDD` shuffle; one in-memory hash table per key group |
 
-The hint is a logical pass-through node (`plan.BroadcastHint`) that survives
-optimizer rewrites. Build-side eligibility per join type is enforced in
-`BroadcastHashJoinExec.{canBuildLeft, canBuildRight}` — broadcasting the LEFT
-side is only safe for INNER and RIGHT joins (a LEFT outer would need to know
-which build-side rows had no probe match, which a map-only operator can't
-report). FULL OUTER never broadcasts.
+Selection logic lives in `SparkPlanner.planJoin`. Broadcast wins over
+sort-merge wins over shuffled-hash, with the eligibility checks:
+
+- The broadcast hint (`plan.BroadcastHint`) is a logical pass-through node
+  that survives optimizer rewrites. Build-side eligibility per join type is
+  enforced in `BroadcastHashJoinExec.{canBuildLeft, canBuildRight}` —
+  broadcasting the LEFT side is only safe for INNER and RIGHT joins
+  (a LEFT outer would need to know which build-side rows had no probe
+  match, which a map-only operator can't report). FULL OUTER never
+  broadcasts.
+- Sort-merge handles all four join types (INNER/LEFT/RIGHT/FULL) directly
+  in its merge loop. The "real Spark uses SMJ as the default" payoff is
+  the ability to stream sorted shuffle data without materialising a full
+  hash table per key group — in MiniSpark we still sort in memory, so the
+  benefit is pedagogical, not memory-real.
 
 What's NOT implemented yet: runtime demotion (turn a planned
-`ShuffledHashJoinExec` into `BroadcastHashJoinExec` after a parent map stage
-materialises and one side turns out small). That needs a query-stage
-materialisation barrier in the SQL planner — a natural follow-on to
-`CoalesceShufflePartitionsRule`.
+`ShuffledHashJoinExec` or `SortMergeJoinExec` into `BroadcastHashJoinExec`
+after a parent map stage materialises and one side turns out small). That
+needs a query-stage materialisation barrier in the SQL planner — a natural
+follow-on to `CoalesceShufflePartitionsRule`.
 
 ## SQL parser
 

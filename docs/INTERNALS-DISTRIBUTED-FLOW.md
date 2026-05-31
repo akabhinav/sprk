@@ -553,6 +553,8 @@ the same path you traced here.
 | per-map size report | `scheduler.MapTaskOutput` | `scheduler.MapStatus` (with size array) |
 | shuffled hash join | `sql.execution.ShuffledHashJoinExec` | same |
 | broadcast hash join | `sql.execution.BroadcastHashJoinExec` | same |
+| sort-merge join | `sql.execution.SortMergeJoinExec` | same |
+| zip two RDDs per partition | `rdd.ZippedPartitionsRDD2` | same |
 | broadcast hint | `sql.plan.BroadcastHint` / `DataFrame.broadcast()` | `ResolvedHint(_, HintInfo(BROADCAST))` |
 | task dispatcher | `scheduler.TaskScheduler` | `TaskSchedulerImpl` + `TaskSetManager` |
 | backend | `cluster.CoarseGrainedSchedulerBackend` | same |

@@ -167,15 +167,17 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 ## Status
 
 All build phases plus Tier A (engine completion), Tier B (SQL), an initial
-AQE rule (post-shuffle partition coalesce), and a second join strategy
-(broadcast-hash) are done. `mvn clean install` → **BUILD SUCCESS, 154 tests**
-(4 rpc + 58 core + 58 sql + 34 examples). The codebase passed a high-effort
-code review (10 findings, all fixed). Every distributed use case has an
-integration test that spawns real executor JVMs.
+AQE rule (post-shuffle partition coalesce), and three physical join
+strategies (broadcast-hash / shuffled-hash / sort-merge) are done.
+`mvn clean install` → **BUILD SUCCESS, 164 tests** (4 rpc + 58 core +
+68 sql + 34 examples). The codebase passed a high-effort code review (10
+findings, all fixed). Every distributed use case has an integration test
+that spawns real executor JVMs.
 
 Adaptive Query Execution: opt-in coalesce of post-shuffle partitions based on
 real map-output sizes (`minispark.sql.adaptive.enabled=true` — see
 [RUNBOOK §4](docs/RUNBOOK.md#adaptive-query-execution-aqe)). Runtime
-shuffled→broadcast join demotion is not implemented yet (needs a query-stage
-materialisation barrier); the compile-time path (hint + small-side detection)
-is, via `df.broadcast()`. Skew-join split is not implemented yet either.
+shuffled→broadcast join demotion and skew-join split are not implemented
+yet (both need a query-stage materialisation barrier in the SQL planner);
+the compile-time broadcast path is, via `df.broadcast()` or an auto
+threshold.
