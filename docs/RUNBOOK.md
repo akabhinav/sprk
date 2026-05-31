@@ -242,17 +242,21 @@ back to system properties).
 ### Adaptive Query Execution (AQE)
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `minispark.sql.adaptive.enabled` | `false` | master switch — turns on both AQE shuffle coalesce **and** the runtime join-demote wrapper |
-| `minispark.sql.adaptive.coalescePartitions.targetSizeInBytes` | `67108864` (64 MiB) | target byte size per post-shuffle partition; contiguous reducers below this are fused into one task |
+| `minispark.sql.adaptive.enabled` | `false` | master switch — turns on AQE shuffle coalesce, skew-split, **and** the runtime join-demote wrapper |
+| `minispark.sql.adaptive.coalescePartitions.targetSizeInBytes` | `67108864` (64 MiB) | target byte size per post-shuffle partition; contiguous reducers below this are fused into one task. Also used as the skew-split target size. |
 | `minispark.sql.adaptive.coalescePartitions.minPartitionNum` | `1` | floor on the post-shuffle partition count (so heavy queries don't drop below useful parallelism) |
 | `minispark.sql.adaptive.autoBroadcastJoinThreshold.rows` | `1000` | runtime row threshold below which a non-broadcast join's small side is demoted to a broadcast join (separate from the compile-time `minispark.sql.autoBroadcastJoinThreshold.rows`) |
+| `minispark.sql.adaptive.skewJoin.enabled` | `false` | turn on skew-split: explode one fat reducer into N sub-tasks each reading a slice of the map outputs |
+| `minispark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` | `268435456` (256 MiB) | absolute floor — a reducer below this is never considered skewed even if it dwarfs siblings |
+| `minispark.sql.adaptive.skewJoin.skewedPartitionFactor` | `5.0` | multiplier over the non-skewed median; a reducer must also exceed `factor × median` to be split |
 
-Two runtime AQE rules:
+Three runtime AQE rules:
 
-1. **CoalesceShufflePartitionsRule** — after a `ShuffleMapStage` finishes, the driver reads the real per-reducer byte sizes from `MapOutputTracker` and fuses contiguous small reducers into one fat post-shuffle partition. Gated to the final `ResultStage`, so no downstream shuffle ever sees a re-partitioned input.
-2. **AdaptiveJoinExec** — wraps every non-broadcast join (`ShuffledHashJoinExec` or `SortMergeJoinExec`) at compile time. At execute time it materialises + caches both children, learns the actual row counts, and demotes to `BroadcastHashJoinExec` if a side comes in under the runtime threshold and the join type allows building that side. This catches "small after filter/aggregate" cases that the compile-time auto-broadcast misses.
+1. **CoalesceShufflePartitionsRule** — after a `ShuffleMapStage` finishes, the driver reads the real per-reducer byte sizes from `MapOutputTracker` and fuses contiguous small reducers into one fat post-shuffle partition.
+2. **OptimizeSkewedPartitionsRule** — same hook, opposite direction: a reducer that's much larger than its siblings is exploded into N sub-tasks via the `ShuffleReader`'s map-id range (one task per slice of map outputs). **Safety caveat**: this puts records with the same key into multiple output partitions, which is correct for "stateless" consumers (`collect`, `map`+`filter`, record-at-a-time `flatMap`) but breaks key-aware consumers (`groupByKey`, `reduceByKey`, `cogroup`). Real Spark only applies skew-split inside joins where the other side gets replicated to preserve correctness; ours operates at the RDD level, so the safe regime is narrower. Off by default for that reason.
+3. **AdaptiveJoinExec** — wraps every non-broadcast join (`ShuffledHashJoinExec` or `SortMergeJoinExec`) at compile time. At execute time it materialises + caches both children, learns the actual row counts, and demotes to `BroadcastHashJoinExec` if a side comes in under the runtime threshold and the join type allows building that side. This catches "small after filter/aggregate" cases that the compile-time auto-broadcast misses.
 
-Both leave query semantics unchanged; only the physical strategy is rewritten. Mirrors Spark's `spark.sql.adaptive.*` key names.
+All three leave query semantics unchanged when their preconditions hold; only the physical strategy is rewritten. Mirrors Spark's `spark.sql.adaptive.*` key names.
 
 ### Join planner
 | Key | Default | Meaning |

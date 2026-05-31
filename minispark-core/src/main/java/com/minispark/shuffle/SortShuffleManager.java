@@ -65,8 +65,10 @@ public final class SortShuffleManager implements ShuffleManager {
     }
 
     @Override
-    public <K, V> ShuffleReader<K, V> getReader(ShuffleHandle handle, int startPartition, int endPartition) {
-        return new SortReader<>(handle, startPartition, endPartition);
+    public <K, V> ShuffleReader<K, V> getReader(ShuffleHandle handle,
+                                                 int startPartition, int endPartition,
+                                                 int startMapId, int endMapId) {
+        return new SortReader<>(handle, startPartition, endPartition, startMapId, endMapId);
     }
 
     @Override
@@ -131,11 +133,16 @@ public final class SortShuffleManager implements ShuffleManager {
         private final ShuffleHandle handle;
         private final int startPartition;
         private final int endPartition;
+        private final int startMapId;   // -1 = no lower bound
+        private final int endMapId;     // -1 = no upper bound
 
-        SortReader(ShuffleHandle handle, int startPartition, int endPartition) {
+        SortReader(ShuffleHandle handle, int startPartition, int endPartition,
+                   int startMapId, int endMapId) {
             this.handle = handle;
             this.startPartition = startPartition;
             this.endPartition = endPartition;
+            this.startMapId = startMapId;
+            this.endMapId = endMapId;
         }
 
         @Override
@@ -143,6 +150,8 @@ public final class SortShuffleManager implements ShuffleManager {
             List<MapOutputTracker.MapStatus> statuses = tracker.getMapStatuses(handle.shuffleId);
             List<Iterator<Tuple2<K, V>>> sources = new ArrayList<>();
             for (MapOutputTracker.MapStatus s : statuses) {
+                if (startMapId >= 0 && s.mapId() < startMapId) continue;
+                if (endMapId >= 0 && s.mapId() >= endMapId) continue;
                 BlockId.ShuffleDataBlock id = new BlockId.ShuffleDataBlock(handle.shuffleId, s.mapId());
                 byte[] bytes;
                 try {

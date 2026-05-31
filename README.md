@@ -168,17 +168,18 @@ is in the **[Runbook](docs/RUNBOOK.md)**.
 
 All build phases plus Tier A (engine completion), Tier B (SQL), three
 physical join strategies (broadcast-hash / shuffled-hash / sort-merge),
-and two AQE rules (post-shuffle partition coalesce + runtime join-demote
-to broadcast) are done. `mvn clean install` → **BUILD SUCCESS, 172 tests**
-(4 rpc + 58 core + 76 sql + 34 examples). The codebase passed a high-effort
-code review (10 findings, all fixed). Every distributed use case has an
-integration test that spawns real executor JVMs.
+and three AQE rules (post-shuffle partition coalesce, skew-partition
+split, runtime join-demote to broadcast) are done. `mvn clean install`
+→ **BUILD SUCCESS, 180 tests** (4 rpc + 66 core + 76 sql + 34 examples).
+The codebase passed a high-effort code review (10 findings, all fixed).
+Every distributed use case has an integration test that spawns real
+executor JVMs.
 
 Adaptive Query Execution: turn on with `minispark.sql.adaptive.enabled=true`
-— see [RUNBOOK §4](docs/RUNBOOK.md#adaptive-query-execution-aqe). Two
-runtime rules are wired in: (1) coalesce small post-shuffle partitions
-based on real map-output byte sizes; (2) demote shuffled-hash /
-sort-merge joins to broadcast joins when a side comes in under the
-runtime row threshold (catches "small after filter/aggregate" that
-compile-time auto-broadcast misses). Skew-join split remains unimplemented;
-the AdaptiveJoinExec scaffolding makes it the next natural addition.
+— see [RUNBOOK §4](docs/RUNBOOK.md#adaptive-query-execution-aqe). Three
+runtime rules are wired in: coalesce small post-shuffle partitions from
+real map-output bytes; split skewed partitions across map-id ranges (opt-in
+via `minispark.sql.adaptive.skewJoin.enabled`, safe only for stateless
+consumers since ours operates at the RDD level rather than join-specific);
+and demote shuffled-hash / sort-merge joins to broadcast when a side comes
+in small at runtime.

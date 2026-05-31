@@ -351,12 +351,27 @@ at any nested `ShuffleDependency` — only shuffles whose consumer is the
 ResultStage are eligible. (Real Spark AQE handles this with explicit query-stage
 boundaries; the simplification here is the same idea applied bluntly.)
 
-What's not implemented: skew-join split (detect a single reducer that's much
-bigger than its siblings and break it into N sub-tasks) and SMJ → broadcast
-demotion (when a child's materialised size fits the broadcast threshold). Both
-would slot into the same `maybeCoalesceShuffles` hook with their own rule
-classes — the structural plumbing (per-reducer size reporting end-to-end,
-range-aware readers, post-stage re-planning callback) is already there.
+Both follow-on AQE rules from the original write-up are now in place. The
+SMJ→broadcast demotion lives one layer up at the SQL planner as
+`AdaptiveJoinExec` (it materialises the join's children to learn their
+actual sizes, then chooses among broadcast / shuffled-hash / sort-merge
+operators at execute time). The skew-split rule
+(`OptimizeSkewedPartitionsRule`) lives right here in the same
+`maybeCoalesceShuffles` hook: it reads per-(map,reducer) byte cells from
+`MapOutputTracker.getMapSizesPerReducer`, detects reducers far above the
+non-skewed median, and replaces their single-reducer slice with N
+sub-slices each carrying a `[startMapId, endMapId)` range — the same
+`ShuffleReader` API that supports reducer-id ranges was extended once to
+also slice by map id, and the `HashShuffleManager`/`SortShuffleManager`
+readers filter their map iteration by that bound.
+
+The remaining caveat — skew-split is only correct for "stateless"
+downstream consumers (`collect`, narrow per-record ops). Key-aware
+operators (`groupByKey`/`reduceByKey`/`cogroup`) assume one-key-per-partition
+and would produce partial groups under a split. Real Spark sidesteps this
+by applying skew-split only inside joins with the matching other-side
+replication; ours operates at the RDD level so the rule is off by default,
+explicit opt-in via `minispark.sql.adaptive.skewJoin.enabled`.
 
 ---
 
@@ -558,6 +573,8 @@ the same path you traced here.
 | broadcast hint | `sql.plan.BroadcastHint` / `DataFrame.broadcast()` | `ResolvedHint(_, HintInfo(BROADCAST))` |
 | AQE join wrapper (runtime demote) | `sql.execution.AdaptiveJoinExec` | `sql.execution.adaptive.{AdaptiveSparkPlanExec, DemoteBroadcastHashJoin}` |
 | materialised intermediate scan | `sql.execution.MaterializedRDDScanExec` | `sql.execution.adaptive.QueryStageExec` |
+| AQE skew partition split | `scheduler.adaptive.OptimizeSkewedPartitionsRule` | `sql.execution.adaptive.OptimizeSkewedJoin` |
+| per-(map,reducer) byte sizes | `MapOutputTracker.getMapSizesPerReducer` | `MapStatus.getSizeForBlock(reduceId)` |
 | task dispatcher | `scheduler.TaskScheduler` | `TaskSchedulerImpl` + `TaskSetManager` |
 | backend | `cluster.CoarseGrainedSchedulerBackend` | same |
 | executor backend | `cluster.CoarseGrainedExecutorBackend` | same |

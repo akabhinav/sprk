@@ -7,6 +7,7 @@ import com.minispark.rdd.RDD;
 import com.minispark.rdd.ShuffleDependency;
 import com.minispark.rdd.ShuffledRDD;
 import com.minispark.scheduler.adaptive.CoalesceShufflePartitionsRule;
+import com.minispark.scheduler.adaptive.OptimizeSkewedPartitionsRule;
 import com.minispark.scheduler.cluster.TaskFailureReason;
 import com.minispark.status.LiveListenerBus;
 import com.minispark.status.SchedulerEvent;
@@ -391,14 +392,15 @@ public final class DAGScheduler {
         maybeCoalesceShuffles(rdd);
         List<Partition> parts = rdd.getPartitions();
         int[] toCompute = stage.partitionsToCompute();
-        // AQE may have shrunk the final RDD's partition count below what the
-        // ResultStage was created with. Clamp the index list to the new layout
-        // (whole-collect semantics still hold: a coalesced partition contains
-        // the union of the records its source reducers would have produced).
-        if (toCompute.length > parts.size()) {
-            int[] clamped = new int[parts.size()];
-            for (int i = 0; i < parts.size(); i++) clamped[i] = i;
-            toCompute = clamped;
+        // AQE may have changed the final RDD's partition count after the
+        // ResultStage was created: coalesce shrinks it (fewer reducers),
+        // skew-split grows it (one fat reducer becomes N). Refresh
+        // toCompute against the post-AQE layout — whole-collect semantics
+        // still hold: every output partition appears exactly once.
+        if (toCompute.length != parts.size()) {
+            int[] refreshed = new int[parts.size()];
+            for (int i = 0; i < parts.size(); i++) refreshed[i] = i;
+            toCompute = refreshed;
         }
         List<Task<?>> tasks = new ArrayList<>(toCompute.length);
         for (int outputId = 0; outputId < toCompute.length; outputId++) {
@@ -453,6 +455,14 @@ public final class DAGScheduler {
         List<ShuffledRDD<?, ?>> targets = new ArrayList<>();
         findShuffledRdds(resultRdd, targets, visited);
 
+        // Skew-split config — separate from coalesce so the two rules tune independently.
+        boolean skewSplitEnabled = conf.get(
+                "minispark.sql.adaptive.skewJoin.enabled", "false").equalsIgnoreCase("true");
+        long skewThresholdBytes = Long.parseLong(conf.get(
+                "minispark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "268435456")); // 256 MiB
+        double skewFactor = Double.parseDouble(conf.get(
+                "minispark.sql.adaptive.skewJoin.skewedPartitionFactor", "5.0"));
+
         for (ShuffledRDD<?, ?> sh : targets) {
             int shuffleId = sh.shuffleDep().shuffleId();
             int numReducers = sh.shuffleDep().partitioner().numPartitions();
@@ -465,6 +475,24 @@ public final class DAGScheduler {
             } else {
                 LOG.debug("AQE: shuffle {} stays at {} partitions (no coalesce benefit)",
                         shuffleId, numReducers);
+            }
+
+            // Skew split: applied AFTER coalesce so the planner sees the
+            // post-coalesce slice list. Single-reducer slices are eligible;
+            // multi-reducer (coalesced) slices are left alone — splitting
+            // them would reorder records across reducer boundaries.
+            if (skewSplitEnabled) {
+                int numMaps = sh.shuffleDep().handle().numMaps;
+                long[][] perCell = mapOutputTracker
+                        .getMapSizesPerReducer(shuffleId, numReducers, numMaps);
+                List<OptimizeSkewedPartitionsRule.SkewedReducer> skews =
+                        OptimizeSkewedPartitionsRule.detectSkew(
+                                sizes, perCell, skewThresholdBytes, skewFactor, targetBytes);
+                for (OptimizeSkewedPartitionsRule.SkewedReducer s : skews) {
+                    LOG.info("AQE: splitting skewed reducer {} of shuffle {} into {} sub-tasks",
+                            s.reducerId(), shuffleId, s.mapIdSplits().size());
+                    sh.applySkewSplit(s.reducerId(), s.mapIdSplits());
+                }
             }
         }
     }

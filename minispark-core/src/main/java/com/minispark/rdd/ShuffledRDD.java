@@ -24,18 +24,34 @@ public final class ShuffledRDD<K, V> extends RDD<Tuple2<K, V>> {
 
     /**
      * One post-shuffle partition. Spans the half-open range
-     * {@code [startReduceId, endReduceId)} of the original reducer ids: by
-     * default each slice is a single reducer ({@code end = start + 1}), but
-     * the AQE coalesce rule can replace the partition list with wider slices.
+     * {@code [startReduceId, endReduceId)} of the original reducer ids and,
+     * optionally, the half-open range {@code [startMapId, endMapId)} of map
+     * ids (sentinels {@code -1, -1} mean "all maps"). Default: single
+     * reducer, all maps. AQE rewrites:
+     *
+     * <ul>
+     *   <li><b>Coalesce</b> widens the reducer range to fuse small
+     *       contiguous reducers.</li>
+     *   <li><b>Skew split</b> narrows the map-id range so multiple slices
+     *       share a single reducer-id but each reads a fraction of the
+     *       map outputs — exploding one fat partition into N tasks.</li>
+     * </ul>
      */
     private static final class ShuffleSlice implements Partition {
         private final int idx;
         final int startReduceId;
         final int endReduceId;
+        final int startMapId;
+        final int endMapId;
         ShuffleSlice(int idx, int startReduceId, int endReduceId) {
+            this(idx, startReduceId, endReduceId, -1, -1);
+        }
+        ShuffleSlice(int idx, int startReduceId, int endReduceId, int startMapId, int endMapId) {
             this.idx = idx;
             this.startReduceId = startReduceId;
             this.endReduceId = endReduceId;
+            this.startMapId = startMapId;
+            this.endMapId = endMapId;
         }
         public int index() { return idx; }
     }
@@ -60,7 +76,7 @@ public final class ShuffledRDD<K, V> extends RDD<Tuple2<K, V>> {
         // SparkEnv lookup, not context() — `context()` is transient and is
         // null after the RDD has been deserialized onto an executor.
         ShuffleReader<K, V> reader = SparkEnv.get().shuffleManager()
-                .getReader(dep.handle(), s.startReduceId, s.endReduceId);
+                .getReader(dep.handle(), s.startReduceId, s.endReduceId, s.startMapId, s.endMapId);
         return reader.read();
     }
 
@@ -92,5 +108,35 @@ public final class ShuffledRDD<K, V> extends RDD<Tuple2<K, V>> {
         }
         this.partitions = p;
         this.coalesced = true;
+    }
+
+    /**
+     * Explode the slices for one skewed reducer into multiple sub-slices, each
+     * carrying a map-id range. The input {@code mapIdSplits} is a list of
+     * {@code [startMapId, endMapId)} ranges that together cover {@code [0, numMaps)}.
+     * Slices for other reducers are untouched. Called after
+     * {@link #applyCoalescedRanges} (if any), so we look only at single-reducer
+     * slices — coalesced multi-reducer ranges are skipped to keep the two AQE
+     * rules from interleaving in confusing ways.
+     */
+    public synchronized void applySkewSplit(int skewedReduceId, List<int[]> mapIdSplits) {
+        List<Partition> p = new ArrayList<>(partitions.size() + mapIdSplits.size());
+        int nextIdx = 0;
+        for (Partition existing : partitions) {
+            ShuffleSlice s = (ShuffleSlice) existing;
+            boolean isThisSingleReducer = (s.endReduceId - s.startReduceId == 1)
+                    && s.startReduceId == skewedReduceId
+                    && s.startMapId < 0;   // only un-split slices
+            if (isThisSingleReducer) {
+                for (int[] r : mapIdSplits) {
+                    p.add(new ShuffleSlice(nextIdx++, skewedReduceId, skewedReduceId + 1, r[0], r[1]));
+                }
+            } else {
+                p.add(new ShuffleSlice(nextIdx++,
+                        s.startReduceId, s.endReduceId, s.startMapId, s.endMapId));
+            }
+        }
+        this.partitions = p;
+        this.coalesced = true; // partition count no longer matches the partitioner
     }
 }

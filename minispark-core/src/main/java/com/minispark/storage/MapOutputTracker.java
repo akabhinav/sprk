@@ -106,6 +106,28 @@ public final class MapOutputTracker implements RpcEndpoint {
         return totals;
     }
 
+    /**
+     * For each (reducer, map) cell, the byte size that {@code map} wrote for
+     * {@code reducer}. Returned shape: {@code [reducerId][mapId]} — same row
+     * count as {@link #getReducerSizes}, columns indexed by {@code mapId} up
+     * to {@code numMaps}. Drives the skew-split planner, which needs to know
+     * how to slice one skewed reducer's reads evenly across maps.
+     */
+    public synchronized long[][] getMapSizesPerReducer(int shuffleId, int numReducers, int numMaps) {
+        long[][] cells = new long[numReducers][numMaps];
+        Map<Integer, MapStatus> m = byShuffle.get(shuffleId);
+        if (m == null) return cells;
+        for (MapStatus s : m.values()) {
+            int mid = s.mapId();
+            if (mid < 0 || mid >= numMaps) continue;
+            long[] sizes = s.partitionBytes();
+            if (sizes == null) continue;
+            int n = Math.min(sizes.length, numReducers);
+            for (int r = 0; r < n; r++) cells[r][mid] = sizes[r];
+        }
+        return cells;
+    }
+
     public void unregisterShuffle(int shuffleId) {
         byShuffle.remove(shuffleId);
     }
