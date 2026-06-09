@@ -5,3 +5,7 @@ target/
 .vscode/
 dependency-reduced-pom.xml
 *.log
+
+# Python
+__pycache__/
+*.pyc

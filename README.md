@@ -18,7 +18,7 @@ interfaces (`SchedulerBackend`, `RpcEnv`, `BlockManager`, `ShuffleManager`).
 
 ---
 
-## Repository layout (5 Maven modules)
+## Repository layout (6 Maven modules)
 
 ```
 minispark-parent (pom)
@@ -26,10 +26,17 @@ minispark-parent (pom)
 ├── miniyarn            cluster manager: ResourceManager, NodeManager, ApplicationMaster
 ├── minispark-core      the engine: RDD, DAGScheduler, shuffle, storage, executor, web UI
 ├── minispark-sql       DataFrame/SQL layer (a miniature Catalyst) over the engine
+├── minispark-python    PySpark bridge: socket gateway (Py4J role) + PythonRDD worker pipe
 └── minispark-examples  runnable demos (WordCount, SqlExample, WordCountWithUI)
 ```
 
-Module dependency order: `rpc → miniyarn → core → sql → examples`.
+Module dependency order: `rpc → miniyarn → core → sql → python → examples`.
+
+**PySpark-shaped Python API** (`python/minispark`, [docs](python/README.md)) —
+built the real-Spark way with two planes: a socket **gateway** (the Py4J role)
+so DataFrame/SQL run natively in the JVM, and **`PythonRDD`** which forks a
+`python` worker on the executor to run your cloudpickled lambdas. Run it with
+`scripts/pyminispark.sh python/examples/demo.py`.
 
 ---
 

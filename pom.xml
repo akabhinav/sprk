@@ -19,6 +19,7 @@
         <module>miniyarn</module>
         <module>minispark-core</module>
         <module>minispark-sql</module>
+        <module>minispark-python</module>
         <module>minispark-examples</module>
     </modules>
 
